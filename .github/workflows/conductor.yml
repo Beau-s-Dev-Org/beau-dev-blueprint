@@ -27,5 +27,8 @@ jobs:
       - name: Run Decomposition
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python scripts/decompose.py ${{ steps.files.outputs.filename }}
+          # 1. Replace with your Ollama Cloud API Key
+          OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }} 
+          # 2. Add the custom Base URL for your Ollama Cloud provider
+          OPENAI_BASE_URL: "https://api.ollama.cloud" # <--- Change to your actual provider URL
+          DECOMP_MODEL: "llama3.1-70b" # <--- Specify the model name you want to use
