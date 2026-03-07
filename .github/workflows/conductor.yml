@@ -7,7 +7,8 @@ jobs:
   decompose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
@@ -24,11 +25,9 @@ jobs:
       - name: Install dependencies
         run: pip install openai
 
-      - name: Run Decomposition
+      - name: Run Decomposition Script
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 1. Replace with your Ollama Cloud API Key
-          OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }} 
-          # 2. Add the custom Base URL for your Ollama Cloud provider
-          OPENAI_BASE_URL: "https://api.ollama.cloud" # <--- Change to your actual provider URL
-          DECOMP_MODEL: "llama3.1-70b" # <--- Specify the model name you want to use
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+          OPENAI_BASE_URL: "https://api.ollama.cloud" # <--- Double check this is your Cloud URL
+        run: python .agents/scripts/decompose.py "${{ steps.files.outputs.filename }}"
