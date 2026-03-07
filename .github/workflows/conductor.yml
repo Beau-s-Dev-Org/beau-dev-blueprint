@@ -29,5 +29,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          OPENAI_BASE_URL: "https://api.ollama.cloud" # <--- Double check this is your Cloud URL
+          OPENAI_BASE_URL: "https://ollama.com" # <
         run: python .agents/scripts/decompose.py "${{ steps.files.outputs.filename }}"
