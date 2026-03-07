@@ -1,0 +1,22 @@
+model_list:
+  # --- Tier 1: Reasoning (Claude 3.5 Sonnet) ---
+  - model_name: reasoning-agent
+    litellm_params:
+      model: anthropic/claude-3-5-sonnet-latest
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+
+  # --- Tier 2: Logic (Ollama Cloud - Your $20/mo Plan) ---
+  - model_name: logic-agent
+    litellm_params:
+      model: openai/llama3.1-70b # Or your specific cloud model name
+      api_key: "os.environ/OLLAMA_CLOUD_API_KEY"
+      api_base: "https://api.ollama.cloud" # Replace with your actual cloud URL
+
+  # --- Tier 3: Local & Free (Ollama Local) ---
+  - model_name: local-worker
+    litellm_params:
+      model: ollama/llama3.1
+      api_base: "http://localhost:11434"
+
+general_settings:
+  master_key: "sk-your-master-key" # Your local proxy password
