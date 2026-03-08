@@ -23,7 +23,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install openai PyYAML requests
+        run: pip install openai pyyaml requests
 
       - name: Run Decomposition Script
         env:
