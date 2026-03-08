@@ -42,6 +42,33 @@ The Conductor runs as a **GitHub Action** (`.github/workflows/conductor.yml`) th
 | `model:logic-agent` | GPT-4o-mini / Ollama Cloud | Standard logic, mid-complexity tasks |
 | `model:local-worker` | Ollama (local) | Simple tasks suitable for local execution |
 
+## Automated PR Reviewer 🔍
+
+Every pull request is automatically reviewed by an AI agent powered by Ollama.
+
+### Purpose
+
+The PR Reviewer catches code quality issues, logic errors, and style problems before a human ever looks at the PR, and iterates with the implementing agent until the code meets quality standards.
+
+### How It Works
+
+The reviewer runs as a **GitHub Action** (`.github/workflows/reviewer-agent.yml`) that triggers automatically on every pull request open, push, or reopen.
+
+```
+[PR opened / updated] → [Reviewer GitHub Action fires]
+    → [AI model reviews the diff] → [Review comment posted on PR]
+        → [Agent fixes issues] → [Cycle repeats up to MAX_REVIEW_CYCLES]
+```
+
+### Safeguards
+
+| Setting | Default | Description |
+|---|---|---|
+| `REVIEW_MODEL` | `qwen3-coder-next` | Model used for standard review cycles |
+| `ESCALATE_MODEL` | `qwen3-235b-a22b` | Stronger model used after `ESCALATE_AFTER_CYCLES` |
+| `ESCALATE_AFTER_CYCLES` | `2` | Switch to escalation model after this many cycles |
+| `MAX_REVIEW_CYCLES` | `3` | Hard cap — halts the loop and requests human review |
+
 ## Usage
 
 To onboard an existing repo:
