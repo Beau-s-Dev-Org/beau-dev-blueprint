@@ -13,10 +13,54 @@ REPO = os.environ["REPO"]
 # within limits while covering the most meaningful parts of most PR diffs.
 MAX_DIFF_CHARS = 8000
 
+# ── Loop-safety controls ────────────────────────────────────────────────────
+# How many completed automated review cycles to allow before escalating to the
+# stronger model. When cycle_count reaches this value the escalation kicks in
+# (e.g. 2 = escalate when cycle_count reaches 2, i.e. on the 3rd cycle).
+ESCALATE_AFTER_CYCLES = int(os.getenv("ESCALATE_AFTER_CYCLES", "2"))
+# Hard cap: after this many completed cycles the loop is stopped entirely to
+# prevent runaway token consumption.
+MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "3"))
+# Sentinel string used to identify automated review comments when counting cycles.
+REVIEW_MARKER = "## 🤖 Automated PR Review"
+
 client = Client(
     host="https://ollama.com",
     headers={"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"},
 )
+
+
+def get_review_cycle_count():
+    """Count how many automated review cycles have already run on this PR.
+
+    Scans all PR comments for the REVIEW_MARKER sentinel to determine how many
+    times the automated reviewer has already posted, which is used to enforce
+    the escalation threshold and the hard cap.
+    """
+    url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    count = 0
+    page = 1
+    while True:
+        try:
+            response = requests.get(url, headers=headers, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            print(f"⚠️  Warning: could not fetch PR comments to check cycle count: {e}")
+            return 0
+        comments = response.json()
+        if not comments:
+            break
+        for comment in comments:
+            if comment.get("body", "").startswith(REVIEW_MARKER):
+                count += 1
+        if len(comments) < 100:
+            break
+        page += 1
+    return count
 
 
 def get_pr_diff():
@@ -80,13 +124,45 @@ def create_review_issue(issue):
 def main():
     print(f"🔍 Reviewing PR #{PR_NUMBER} in {REPO}...")
 
+    # ── Loop-safety check ───────────────────────────────────────────────────
+    cycle_count = get_review_cycle_count()
+    print(f"📊 Completed review cycles so far: {cycle_count}")
+
+    if cycle_count >= MAX_REVIEW_CYCLES:
+        # Hard cap reached — post a one-time warning and halt to prevent runaway
+        # token consumption without creating any more issues.
+        print(
+            f"🛑 Hard cap reached ({cycle_count}/{MAX_REVIEW_CYCLES} cycles). "
+            "Halting automated review loop."
+        )
+        post_comment(
+            f"{REVIEW_MARKER} — ⚠️ Circuit Breaker Triggered\n\n"
+            f"This PR has already gone through **{cycle_count}** automated review "
+            f"cycle(s), which exceeds the configured limit of **{MAX_REVIEW_CYCLES}**.\n\n"
+            "The automated review loop has been halted to prevent runaway token usage. "
+            "Please request a **human review** to resolve any remaining outstanding issues."
+        )
+        return
+
     diff = get_pr_diff()
     if not diff.strip():
         print("No diff found. Skipping review.")
         return
 
     truncated_diff = diff[:MAX_DIFF_CHARS]
-    model_name = os.getenv("REVIEW_MODEL", "qwen3-coder-next")
+
+    # ── Model selection with escalation ─────────────────────────────────────
+    default_model = os.getenv("REVIEW_MODEL", "qwen3-coder-next")
+    escalate_model = os.getenv("ESCALATE_MODEL", default_model)
+    if cycle_count >= ESCALATE_AFTER_CYCLES:
+        model_name = escalate_model
+        print(
+            f"⬆️  Escalating to stronger model '{model_name}' "
+            f"after {cycle_count} completed cycle(s)."
+        )
+    else:
+        model_name = default_model
+        print(f"🤖 Using model '{model_name}' (cycle {cycle_count + 1}).")
 
     prompt = f"""You are an expert code reviewer. Review the following pull request diff.
 
@@ -124,12 +200,21 @@ DIFF:
 
     # Post the human-readable review as a PR comment.
     issue_count = len(issues)
-    footer = (
-        f"\n\n---\n_🔖 {issue_count} actionable issue(s) logged for the orchestrator to assign._"
-        if issue_count
-        else "\n\n---\n_✅ No actionable issues found._"
+    model_note = (
+        f"🔬 _Model escalated to **{model_name}** (review cycle {cycle_count + 1})._"
+        if cycle_count >= ESCALATE_AFTER_CYCLES
+        else f"_Review cycle {cycle_count + 1} · model: {model_name}_"
     )
-    comment = f"## 🤖 Automated PR Review\n\n{summary}{footer}"
+    if issue_count:
+        cycles_remaining = MAX_REVIEW_CYCLES - cycle_count - 1
+        if cycles_remaining == 0:
+            cycle_warning = "⚠️ This is the **final** automated cycle — the circuit breaker will trigger on the next push."
+        else:
+            cycle_warning = f"{cycles_remaining} automated cycle(s) remaining before the circuit breaker triggers."
+        issue_footer = f"🔖 {issue_count} actionable issue(s) logged for the orchestrator to assign. {cycle_warning}"
+    else:
+        issue_footer = "✅ No actionable issues found."
+    comment = f"{REVIEW_MARKER}\n\n{summary}\n\n---\n{model_note}  \n_{issue_footer}_"
     post_comment(comment)
 
     # Create a GitHub Issue for each actionable finding so the orchestrator
