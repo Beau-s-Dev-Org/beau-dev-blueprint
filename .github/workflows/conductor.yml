@@ -32,7 +32,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
           # Use the verified OpenAI-compatible cloud endpoint
-          OPENAI_BASE_URL: "https://ollama.com/v1"
+          OPENAI_BASE_URL: "https://ollama.com/api"
           # Your chosen reasoning model
           DECOMP_MODEL: "qwen3-coder-next"
         run: |
