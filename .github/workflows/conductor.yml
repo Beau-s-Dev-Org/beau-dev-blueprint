@@ -31,12 +31,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          OPENAI_BASE_URL: "https://ollama.com" 
+          # Use the verified OpenAI-compatible cloud endpoint
+          OPENAI_BASE_URL: "https://ollama.com/v1"
+          # Your chosen reasoning model
+          DECOMP_MODEL: "qwen3-coder-next"
         run: |
-          # If no file was found, don't crash, just exit quietly
-          if [ -z "${{ steps.files.outputs.filename }}" ]; then
-            echo "No proposal file detected in this push."
-            exit 0
-          fi
-          python .agents/scripts/decompose.py "${{ steps.files.outputs.filename }}"
+         # If no file was found, don't crash, just exit quietly
+         if [ -z "${{ steps.files.outputs.filename }}" ]; then
+         echo "No proposal file detected in this push."
+         exit 0
+         fi
+         # Run the decomposition script once
+         python .agents/scripts/decompose.py "${{ steps.files.outputs.filename }}"
+
+
 
