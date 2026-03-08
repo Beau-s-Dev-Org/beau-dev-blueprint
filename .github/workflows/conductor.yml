@@ -19,11 +19,11 @@ jobs:
 
       - name: Set up Python
         uses: actions/setup-python@v4
-        with:
+        with: 
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install openai
+        run: pip install openai PyYAML requests
 
       - name: Run Decomposition Script
         env:
