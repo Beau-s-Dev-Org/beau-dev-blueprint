@@ -9,7 +9,7 @@ from ollama import chat, Client # <--- Correct import from your image
 # This tells the library to talk to Ollama Cloud instead of your local PC
 client = Client(
     host='https://ollama.com',
-    headers={'Authorization': f"Bearer {os.environ.get('OLLAMA_API_KEY')}"}
+    headers={'Authorization': f"Bearer {os.environ.get('OLLAMA_CLOUD_API_KEY')}"}
 )
 
 def create_issue(task):
