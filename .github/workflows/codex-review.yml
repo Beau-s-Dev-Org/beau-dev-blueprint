@@ -10,6 +10,7 @@ jobs:
     permissions:
       pull-requests: write
       contents: read
+      issues: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -27,6 +28,7 @@ jobs:
       - name: Run Codex PR Review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
           REVIEW_MODEL: "qwen3-coder-next"
           PR_NUMBER: ${{ github.event.pull_request.number }}

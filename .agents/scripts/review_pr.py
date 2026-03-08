@@ -1,4 +1,6 @@
+import json
 import os
+import subprocess
 import requests
 from ollama import Client
 
@@ -47,6 +49,34 @@ def post_comment(body):
     print("✅ Review posted successfully.")
 
 
+def create_review_issue(issue):
+    """Creates a GitHub Issue for an actionable problem found during PR review."""
+    title = issue.get("title", "PR Review Issue")
+    description = issue.get("description", "")
+    severity = issue.get("severity", "medium")
+    area = issue.get("area", "code-quality")
+
+    # Mirror the label pattern used by decompose.py so the orchestrator picks
+    # these issues up automatically alongside proposal-derived tasks.
+    required_labels = ["status:ready", "logic-agent", f"area:{area}", "pr-review"]
+    for label in required_labels:
+        result = subprocess.run(["gh", "label", "create", label, "--force"], capture_output=True)
+        if result.returncode != 0:
+            print(f"  ⚠️  Warning: could not create label '{label}': {result.stderr.decode().strip()}")
+
+    label_string = ",".join(required_labels)
+    body = (
+        f"## Issue Found During PR Review\n\n"
+        f"**PR:** #{PR_NUMBER}\n"
+        f"**Severity:** {severity}\n\n"
+        f"{description}"
+    )
+
+    cmd = ["gh", "issue", "create", "--title", title, "--body", body, "--label", label_string]
+    print(f"  📝 Creating issue: {title}")
+    subprocess.run(cmd, check=True)
+
+
 def main():
     print(f"🔍 Reviewing PR #{PR_NUMBER} in {REPO}...")
 
@@ -58,15 +88,17 @@ def main():
     truncated_diff = diff[:MAX_DIFF_CHARS]
     model_name = os.getenv("REVIEW_MODEL", "qwen3-coder-next")
 
-    prompt = f"""You are an expert code reviewer. Review the following pull request diff and provide concise, constructive feedback.
+    prompt = f"""You are an expert code reviewer. Review the following pull request diff.
 
-Focus on:
-- Code quality and best practices
-- Potential bugs or security issues
-- Suggestions for improvement
-- What looks good (positive feedback)
+Return a JSON object with exactly two keys:
+- "summary": A Markdown-formatted overall review covering code quality, best practices, potential bugs or security issues, suggestions for improvement, and what looks good.
+- "issues": An array of actionable problems that require a follow-up fix. Each element must have:
+  - "title": A short title under 80 characters.
+  - "description": A detailed description of the problem and how to fix it.
+  - "severity": One of "high", "medium", or "low".
+  - "area": One of "bug", "security", "performance", "code-quality", or "testing".
 
-Format your response in Markdown.
+If no actionable issues are found, return an empty "issues" array.
 
 DIFF:
 {truncated_diff}
@@ -76,13 +108,39 @@ DIFF:
         response = client.chat(
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
+            format="json",
         )
     except Exception as e:
         raise RuntimeError(f"Ollama API call failed: {e}") from e
 
-    review_body = response.message.content
-    comment = f"## 🤖 Automated PR Review\n\n{review_body}"
+    content = response.message.content.strip()
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Model returned invalid JSON: {e}\nRaw content: {content}") from e
+
+    summary = result.get("summary", "_No summary provided by the reviewer._")
+    issues = result.get("issues", [])
+
+    # Post the human-readable review as a PR comment.
+    issue_count = len(issues)
+    footer = (
+        f"\n\n---\n_🔖 {issue_count} actionable issue(s) logged for the orchestrator to assign._"
+        if issue_count
+        else "\n\n---\n_✅ No actionable issues found._"
+    )
+    comment = f"## 🤖 Automated PR Review\n\n{summary}{footer}"
     post_comment(comment)
+
+    # Create a GitHub Issue for each actionable finding so the orchestrator
+    # can assign it to an agent for remediation.
+    if issues:
+        print(f"📋 Logging {issue_count} issue(s) for the orchestrator...")
+        for issue in issues:
+            create_review_issue(issue)
+        print("✅ All issues created.")
+    else:
+        print("✅ No actionable issues to log.")
 
 
 if __name__ == "__main__":
