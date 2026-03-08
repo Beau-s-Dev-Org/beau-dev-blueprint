@@ -1,11 +1,7 @@
 name: Close Completed Issues (one-time)
 
 on:
-  push:
-    branches:
-      - copilot/review-and-close-open-issues
-    paths:
-      - '.github/workflows/close-completed-issues.yml'
+  workflow_dispatch:
 
 jobs:
   close-issues:
