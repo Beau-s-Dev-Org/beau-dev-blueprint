@@ -31,7 +31,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          OPENAI_BASE_URL: "https://api.ollama.cloud" 
+          OPENAI_BASE_URL: "https://ollama.com" 
         run: |
           # If no file was found, don't crash, just exit quietly
           if [ -z "${{ steps.files.outputs.filename }}" ]; then
