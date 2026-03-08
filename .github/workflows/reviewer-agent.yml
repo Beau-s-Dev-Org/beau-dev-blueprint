@@ -1,4 +1,4 @@
-name: Codex - Automated PR Review
+name: Automated PR Review
 
 on:
   pull_request:
@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: pip install ollama requests
 
-      - name: Run Codex PR Review
+      - name: Run PR Reviewer Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
