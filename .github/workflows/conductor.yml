@@ -10,24 +10,33 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0 # Get full history so git diff works
 
       - name: Get changed file
         id: files
         run: |
-          echo "filename=$(git diff --name-only HEAD^ HEAD | grep 'proposals/' | head -n 1)" >> $GITHUB_OUTPUT
+          # This finds the last changed file in proposals/
+          FILE=$(git diff --name-only HEAD^ HEAD | grep 'proposals/' | head -n 1)
+          echo "filename=$FILE" >> $GITHUB_OUTPUT
 
       - name: Set up Python
         uses: actions/setup-python@v4
-        with: 
+        with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install openai pyyaml requests
+        run: pip install openai PyYAML requests
 
       - name: Run Decomposition Script
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          OPENAI_BASE_URL: "https://ollama.com" # <
-        run: python .agents/scripts/decompose.py "${{ steps.files.outputs.filename }}"
+          OPENAI_BASE_URL: "https://api.ollama.cloud" 
+        run: |
+          # If no file was found, don't crash, just exit quietly
+          if [ -z "${{ steps.files.outputs.filename }}" ]; then
+            echo "No proposal file detected in this push."
+            exit 0
+          fi
+          python .agents/scripts/decompose.py "${{ steps.files.outputs.filename }}"
+
