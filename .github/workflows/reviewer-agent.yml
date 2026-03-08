@@ -1,0 +1,43 @@
+name: Automated PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install ollama requests
+
+      - name: Run PR Reviewer Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+          REVIEW_MODEL: "qwen3-coder-next"
+          # After ESCALATE_AFTER_CYCLES completed review cycles on the same PR,
+          # switch to this stronger model for deeper analysis.
+          ESCALATE_MODEL: "qwen3-235b-a22b"
+          ESCALATE_AFTER_CYCLES: "2"
+          # Hard cap: halt the loop entirely after this many completed cycles to
+          # prevent runaway token usage.
+          MAX_REVIEW_CYCLES: "3"
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: python .agents/scripts/review_pr.py
