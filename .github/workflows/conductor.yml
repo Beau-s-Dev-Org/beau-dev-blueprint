@@ -25,15 +25,13 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install openai PyYAML requests
+        run: pip install ollama PyYAML requests
 
       - name: Run Decomposition Script
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          # Use the verified OpenAI-compatible cloud endpoint
-          OPENAI_BASE_URL: "https://ollama.com/api"
-          # Your chosen reasoning model
+          # The Ollama library expects OLLAMA_API_KEY
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }} 
           DECOMP_MODEL: "qwen3-coder-next"
         run: |
          # If no file was found, don't crash, just exit quietly
