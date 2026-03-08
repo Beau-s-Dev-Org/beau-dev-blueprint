@@ -74,5 +74,5 @@ The reviewer runs as a **GitHub Action** (`.github/workflows/reviewer-agent.yml`
 To onboard an existing repo:
 
 1. Clone the repo or open the existing folder.
-2. Run: `curl -sSL https://raw.githubusercontent.com/[YOUR_USER]/beau-dev-blueprint/main/onboard.sh | bash` (or run local copy).
+2. Run: `curl -sSL https://raw.githubusercontent.com/Beau-s-Dev-Org/beau-dev-blueprint/main/onboard.sh | bash` (or run local copy).
 3. Tell AntiGravity: "Onboard this workspace from my blueprint."
