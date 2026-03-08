@@ -2,6 +2,7 @@ import os
 import json
 import sys
 import subprocess
+import yaml
 from openai import OpenAI
 
 # Initialize Client (GitHub Action will provide the API Key)
