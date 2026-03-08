@@ -22,12 +22,13 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install openai requests
+        run: pip install ollama requests
 
       - name: Run Codex PR Review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+          REVIEW_MODEL: "qwen3-coder-next"
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: python .agents/scripts/review_pr.py

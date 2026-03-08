@@ -1,17 +1,20 @@
 import os
 import requests
-from openai import OpenAI
+from ollama import Client
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+OLLAMA_CLOUD_API_KEY = os.environ["OLLAMA_CLOUD_API_KEY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
 REPO = os.environ["REPO"]
 
-# gpt-4o-mini has a ~128k token context; 8000 chars keeps the prompt well within
-# limits while still covering the most meaningful parts of most PR diffs.
+# qwen3-coder-next has a large context window; 8000 chars keeps the prompt well
+# within limits while covering the most meaningful parts of most PR diffs.
 MAX_DIFF_CHARS = 8000
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = Client(
+    host="https://ollama.com",
+    headers={"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"},
+)
 
 
 def get_pr_diff():
@@ -53,6 +56,7 @@ def main():
         return
 
     truncated_diff = diff[:MAX_DIFF_CHARS]
+    model_name = os.getenv("REVIEW_MODEL", "qwen3-coder-next")
 
     prompt = f"""You are an expert code reviewer. Review the following pull request diff and provide concise, constructive feedback.
 
@@ -69,15 +73,15 @@ DIFF:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        response = client.chat(
+            model=model_name,
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
-        raise RuntimeError(f"OpenAI API call failed: {e}") from e
+        raise RuntimeError(f"Ollama API call failed: {e}") from e
 
-    review_body = response.choices[0].message.content
-    comment = f"## 🤖 Codex Automated Review\n\n{review_body}"
+    review_body = response.message.content
+    comment = f"## 🤖 Automated PR Review\n\n{review_body}"
     post_comment(comment)
 
 
