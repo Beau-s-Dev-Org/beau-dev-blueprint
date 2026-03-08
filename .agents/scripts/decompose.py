@@ -13,14 +13,20 @@ client = Client(
 
 def create_issue(task):
     """Uses GitHub CLI to create the issue with labels."""
-    # Safety: Try to get 'description', fallback to 'details' or 'task' if missing
     description = task.get('description', task.get('details', task.get('task', 'No description provided.')))
     area = task.get('area', task.get('domain', 'general'))
     
-    labels = f"status:ready,model:logic-agent,area:{area}"
+    # Define our required labels
+    required_labels = ["status:ready", "logic-agent", f"area:{area}"]
+    
+    # Safety: Create labels if they don't exist
+    for label in required_labels:
+        subprocess.run(["gh", "label", "create", label, "--force"], capture_output=True)
+    
+    label_string = ",".join(required_labels)
     body = f"## Task Description\n{description}"
     
-    cmd = ["gh", "issue", "create", "--title", task['task'], "--body", body, "--label", labels]
+    cmd = ["gh", "issue", "create", "--title", task['task'], "--body", body, "--label", label_string]
     print(f"Creating issue: {task['task']}")
     subprocess.run(cmd, check=True)
 
