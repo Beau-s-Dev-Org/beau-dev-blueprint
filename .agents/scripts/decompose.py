@@ -1,8 +1,10 @@
 import os
 import json
 import sys
+import shutil
 import subprocess
 import yaml
+from datetime import datetime
 from ollama import Client
 
 # 1. Setup the Cloud Connection
@@ -66,8 +68,20 @@ def main():
     for task in tasks:
         create_issue(task)
 
-if __name__ == "__main__":
-    main()
+    # Move the processed proposal to prevent accidental reprocessing.
+    # All issues were created successfully above (create_issue uses check=True),
+    # so it is safe to archive the file now.
+    dest_dir = "processed-proposals"
+    os.makedirs(dest_dir, exist_ok=True)
+    basename = os.path.basename(proposal_path)
+    dest_path = os.path.join(dest_dir, basename)
+    if os.path.exists(dest_path):
+        # Avoid overwriting an existing file with the same name
+        stem, ext = os.path.splitext(basename)
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        dest_path = os.path.join(dest_dir, f"{stem}-{timestamp}{ext}")
+    shutil.move(proposal_path, dest_path)
+    print(f"✅ Moved '{proposal_path}' to '{dest_path}'")
 
 if __name__ == "__main__":
     main()
