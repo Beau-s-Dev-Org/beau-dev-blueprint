@@ -55,14 +55,15 @@ def main():
     PROPOSAL:
     {proposal_content}
     """ 
-    # Use the model from the GitHub Action, or default to qwen3-coder-next
+       # Use the model from the GitHub Action, or default to qwen3-coder-next
     model_name = os.getenv("DECOMP_MODEL", "qwen3-coder-next")
 
     response = client.chat.completions.create(
-        model=model_name, # <--- This is the fix
+        model=model_name, # <--- This uses the variable instead of the hard-coded name
         messages=[{"role": "user", "content": prompt}],
         response_format={ "type": "json_object" }
     )
+
 
     # 3. Parse and Create Issues
     raw_json = json.loads(response.choices[0].message.content)
