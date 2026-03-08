@@ -1,0 +1,35 @@
+name: Close Completed Issues (one-time)
+
+on:
+  push:
+    branches:
+      - copilot/review-and-close-open-issues
+    paths:
+      - '.github/workflows/close-completed-issues.yml'
+
+jobs:
+  close-issues:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Close completed issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # These issues were completed in previously merged PRs (#6, #7, #12).
+          # Issue #3 & #5 – README Conductor section (merged via PR #7)
+          # Issue #4 – test.txt dummy file (merged via PR #6)
+          # Issue #8 – JSONDecodeError handling in review_pr.py (merged via PR #7)
+          # Issue #11 – label-creation error logging in review_pr.py (merged via PR #7)
+          # Issue #13 – proposal_path defined via sys.argv[1] in decompose.py (merged via PR #12)
+
+          for ISSUE in 3 4 5 8 11 13; do
+            echo "Closing issue #${ISSUE}..."
+            gh issue close "${ISSUE}" \
+              --repo Beau-s-Dev-Org/beau-dev-blueprint \
+              --reason completed \
+              --comment "Closing as completed. The work described in this issue was delivered in a previously merged PR." \
+              && echo "✅ Closed #${ISSUE}" \
+              || echo "⚠️  Could not close #${ISSUE} (may already be closed)"
+          done
