@@ -1,0 +1,247 @@
+# Open Code Review (Alibaba) — REUSABLE workflow, called from other repos.
+#
+# This is the shared, single-source-of-truth OCR PR-review workflow for all of
+# Beau's repos. Each consuming repo carries only a thin caller stub (see
+# templates/ocr-review-caller.yml in this repo) that declares the triggers and
+# does `uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@main`,
+# passing model config as inputs and the LLM credentials as explicit secrets.
+# All review logic, the pinned OCR action version, and the LLM fallback chain
+# live HERE — edit once, every repo picks it up.
+#
+# This workflow only runs via workflow_call; it never triggers in this repo.
+#
+# Contract (everything is explicit — no `secrets: inherit`, so a consuming
+# repo exposes only its OCR credentials to this workflow, and no reliance on
+# cross-repo vars-context semantics):
+#   inputs   llm_model (required), llm_model_fallback1/2,
+#            llm_use_anthropic_fallback1/2 ('true' only for Anthropic's API)
+#   secrets  OCR_LLM_URL + OCR_LLM_AUTH_TOKEN (required),
+#            OCR_LLM_URL_FALLBACK1/2 + OCR_LLM_AUTH_TOKEN_FALLBACK1/2
+#
+# Fallback semantics: the OCR action has no native fallback, so the workflow
+# retries the whole review against each configured backup when the previous
+# attempt fails. A fallback counts as configured only when its URL secret,
+# token secret, AND model input are all present — a partially-configured
+# fallback is skipped rather than failing on auth with a confusing message.
+# Leaving fallbacks unconfigured changes nothing.
+#
+# The OCR action is pinned to a commit SHA (not @main) since it runs with
+# pull-requests: write and handles LLM/GitHub credentials.
+
+name: OpenCodeReview PR Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      llm_model:
+        description: Model name at the primary endpoint (e.g. openrouter/auto)
+        required: true
+        type: string
+      llm_model_fallback1:
+        description: Model name at the first fallback endpoint
+        required: false
+        type: string
+        default: ''
+      llm_use_anthropic_fallback1:
+        description: "'true' only if fallback 1 is Anthropic's API"
+        required: false
+        type: string
+        default: 'false'
+      llm_model_fallback2:
+        description: Model name at the second fallback endpoint
+        required: false
+        type: string
+        default: ''
+      llm_use_anthropic_fallback2:
+        description: "'true' only if fallback 2 is Anthropic's API"
+        required: false
+        type: string
+        default: 'false'
+    secrets:
+      OCR_LLM_URL:
+        description: Primary OpenAI-compatible endpoint URL
+        required: true
+      OCR_LLM_AUTH_TOKEN:
+        description: API key for the primary endpoint
+        required: true
+      OCR_LLM_URL_FALLBACK1:
+        required: false
+      OCR_LLM_AUTH_TOKEN_FALLBACK1:
+        required: false
+      OCR_LLM_URL_FALLBACK2:
+        required: false
+      OCR_LLM_AUTH_TOKEN_FALLBACK2:
+        required: false
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+    # Each review attempt has its own 20-minute step timeout, so a hung LLM
+    # endpoint cannot consume the whole job budget; 65 covers three sequential
+    # attempts (3 × 20) plus overhead, guaranteeing the final fail-gate step
+    # still runs instead of being cancelled by the job timeout.
+    timeout-minutes: 65
+    # The secrets context is NOT available in step-level `if:` conditions
+    # (only github/needs/strategy/matrix/job/runner/env/vars/steps/inputs are),
+    # so "is this fallback configured?" is computed here in job env — where
+    # secrets ARE available — and the fallback steps gate on the boolean.
+    env:
+      OCR_FALLBACK1_CONFIGURED: ${{ secrets.OCR_LLM_URL_FALLBACK1 != '' && secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 != '' && inputs.llm_model_fallback1 != '' }}
+      OCR_FALLBACK2_CONFIGURED: ${{ secrets.OCR_LLM_URL_FALLBACK2 != '' && secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 != '' && inputs.llm_model_fallback2 != '' }}
+    # Conditional concurrency group (job-level, since a reusable workflow
+    # cannot set workflow-level concurrency for its caller).
+    #
+    # Matching events (PR events + /open-code-review comments from
+    # MEMBER/OWNER/COLLABORATOR humans) share a per-PR group so a new review
+    # cancels any stale one for the same PR. Non-matching comments land in a
+    # unique noop-<run_id> group that can never collide with a real review, so
+    # they are skipped instantly without cancelling anything. (The github
+    # context inside a called workflow is the CALLER's event, so these
+    # expressions see the real PR/comment payload.)
+    concurrency:
+      group: >-
+        ${{
+          (
+            github.event_name == 'pull_request_target'
+            || (
+              github.event_name == 'issue_comment'
+              && github.event.issue.pull_request
+              && github.event.comment.user.type != 'Bot'
+              && (
+                github.event.comment.author_association == 'MEMBER'
+                || github.event.comment.author_association == 'OWNER'
+                || github.event.comment.author_association == 'COLLABORATOR'
+              )
+              && (
+                startsWith(github.event.comment.body, '/open-code-review')
+                || startsWith(github.event.comment.body, '@open-code-review')
+              )
+            )
+          )
+          && format('ocr-{0}', github.event.pull_request.number || github.event.issue.number)
+          || format('noop-{0}', github.run_id)
+        }}
+      cancel-in-progress: true
+    # Run on PR events, or on human-authored comments starting with trigger
+    # keywords. Bot comments are excluded as a safety net: GITHUB_TOKEN already
+    # suppresses events from bot-posted comments, but a PAT/App token would not.
+    # issue_comment triggers are further gated on author_association so only
+    # MEMBER/OWNER/COLLABORATOR users can spend LLM quota via re-review.
+    if: |
+      github.event_name == 'pull_request_target'
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+        )
+        && (
+          startsWith(github.event.comment.body, '/open-code-review')
+          || startsWith(github.event.comment.body, '@open-code-review')
+        )
+      )
+    steps:
+      - name: Get PR context
+        id: pr-context
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // For issue_comment events, resolve PR base/head so the action
+            // can review the right diff (issue_comment has no top-level
+            // pull_request payload fields).
+            const prNumber = context.issue.number;
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            core.setOutput('base_ref', pullRequest.base.ref);
+            core.setOutput('head_sha', pullRequest.head.sha);
+
+      - name: Run OpenCodeReview (primary)
+        id: ocr-primary
+        # v1.8.6 — pinned to the release commit SHA, not @main.
+        # continue-on-error so a primary LLM failure falls through to the
+        # fallback attempts below instead of failing the job outright; the
+        # final "Fail if all review attempts failed" step restores the red X
+        # when no attempt succeeds.
+        timeout-minutes: 20
+        continue-on-error: true
+        uses: alibaba/open-code-review@a17e884c2bb2f460f694cf757deb2bf3d93dcd82 # v1.8.6
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+          llm_model: ${{ inputs.llm_model }}
+          llm_use_anthropic: 'false'
+          ocr_version: '1.8.6'
+          # For issue_comment triggers, pass the resolved refs; for
+          # pull_request_target the action resolves them from the event.
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
+
+      - name: Run OpenCodeReview (fallback 1)
+        id: ocr-fallback1
+        # Runs only when the primary attempt failed AND a first fallback
+        # backend is fully configured (URL + token + model). Same pinned SHA
+        # and inputs as the primary; only the LLM backend differs.
+        # NOTE: in the rare case the primary's LLM call succeeded but posting
+        # comments failed partway, a fallback re-review may post duplicates —
+        # the action's sticky summary updates in place, but inline comments
+        # can repeat. Accepted: a duplicated review beats a silently missing
+        # one, and history is never deleted.
+        if: >-
+          steps.ocr-primary.outcome == 'failure'
+          && env.OCR_FALLBACK1_CONFIGURED == 'true'
+        timeout-minutes: 20
+        continue-on-error: true
+        uses: alibaba/open-code-review@a17e884c2bb2f460f694cf757deb2bf3d93dcd82 # v1.8.6
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL_FALLBACK1 }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 }}
+          llm_model: ${{ inputs.llm_model_fallback1 }}
+          llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback1 || 'false' }}
+          ocr_version: '1.8.6'
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
+
+      - name: Run OpenCodeReview (fallback 2)
+        id: ocr-fallback2
+        # Runs only when the primary failed, fallback 1 did not succeed
+        # (failed, or was skipped because it isn't configured), and a second
+        # fallback backend is fully configured.
+        if: >-
+          steps.ocr-primary.outcome == 'failure'
+          && steps.ocr-fallback1.outcome != 'success'
+          && env.OCR_FALLBACK2_CONFIGURED == 'true'
+        timeout-minutes: 20
+        continue-on-error: true
+        uses: alibaba/open-code-review@a17e884c2bb2f460f694cf757deb2bf3d93dcd82 # v1.8.6
+        with:
+          llm_url: ${{ secrets.OCR_LLM_URL_FALLBACK2 }}
+          llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 }}
+          llm_model: ${{ inputs.llm_model_fallback2 }}
+          llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback2 || 'false' }}
+          ocr_version: '1.8.6'
+          base_ref: ${{ steps.pr-context.outputs.base_ref }}
+          head_sha: ${{ steps.pr-context.outputs.head_sha }}
+
+      - name: Fail if all review attempts failed
+        # The attempt steps are continue-on-error, so this step is the only
+        # thing that turns the job red. A skipped fallback (not configured)
+        # has outcome 'skipped', which correctly does not count as success.
+        if: >-
+          steps.ocr-primary.outcome != 'success'
+          && steps.ocr-fallback1.outcome != 'success'
+          && steps.ocr-fallback2.outcome != 'success'
+        env:
+          PRIMARY_OUTCOME: ${{ steps.ocr-primary.outcome }}
+          FALLBACK1_OUTCOME: ${{ steps.ocr-fallback1.outcome }}
+          FALLBACK2_OUTCOME: ${{ steps.ocr-fallback2.outcome }}
+        shell: bash
+        run: |
+          echo "::error::All configured OCR LLM backends failed (primary: ${PRIMARY_OUTCOME}, fallback1: ${FALLBACK1_OUTCOME}, fallback2: ${FALLBACK2_OUTCOME})."
+          exit 1

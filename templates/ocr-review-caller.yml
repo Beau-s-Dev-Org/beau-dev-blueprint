@@ -1,0 +1,60 @@
+# OCR PR review — thin caller stub.
+#
+# Copy this file to .github/workflows/ocr-review.yml in any repo (or run
+# scripts/rollout-ocr.sh, which does it for you). All review logic lives in
+# the reusable workflow in Beau-s-Dev-Org/beau-dev-blueprint — this stub only
+# declares the triggers and forwards this repo's OCR config.
+#
+# Per-repo config required (Settings -> Secrets and variables -> Actions):
+#   secret    OCR_LLM_URL          secret    OCR_LLM_AUTH_TOKEN
+#   variable  OCR_LLM_MODEL
+# Optional fallback backends: the same trio (plus optional
+# OCR_LLM_USE_ANTHROPIC_FALLBACKn variable) suffixed _FALLBACK1 / _FALLBACK2.
+# Full documentation is in the reusable workflow's header comment.
+#
+# Secrets are passed EXPLICITLY (no `secrets: inherit`) so the called workflow
+# only ever sees the OCR credentials, never this repo's other secrets.
+#
+# The @main reference is deliberate, not an oversight: the blueprint repo and
+# this repo share one owner, blueprint main is ruleset-protected (PR-only, no
+# force push, no deletion), and pinning a SHA here would defeat the
+# edit-once-applies-everywhere purpose of centralizing the workflow.
+# Job-level per-PR concurrency (cancel-in-progress) and a 65-minute job
+# timeout with 20-minute per-attempt step timeouts are all defined in the
+# reusable workflow.
+
+name: OpenCodeReview PR Review
+
+# pull_request_target (not pull_request) so secrets are available even for
+# PRs opened from forks. Safe because OCR only reads the diff and does not
+# execute any code from the PR (the reusable workflow checks out the trusted
+# base; PR head blobs are fetched as git objects only). synchronize
+# re-reviews on every new commit; the issue_comment trigger allows manual
+# /open-code-review re-runs (gated to MEMBER/OWNER/COLLABORATOR inside the
+# reusable workflow).
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ocr:
+    uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@main
+    with:
+      llm_model: ${{ vars.OCR_LLM_MODEL }}
+      llm_model_fallback1: ${{ vars.OCR_LLM_MODEL_FALLBACK1 }}
+      llm_use_anthropic_fallback1: ${{ vars.OCR_LLM_USE_ANTHROPIC_FALLBACK1 }}
+      llm_model_fallback2: ${{ vars.OCR_LLM_MODEL_FALLBACK2 }}
+      llm_use_anthropic_fallback2: ${{ vars.OCR_LLM_USE_ANTHROPIC_FALLBACK2 }}
+    secrets:
+      OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+      OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+      OCR_LLM_URL_FALLBACK1: ${{ secrets.OCR_LLM_URL_FALLBACK1 }}
+      OCR_LLM_AUTH_TOKEN_FALLBACK1: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 }}
+      OCR_LLM_URL_FALLBACK2: ${{ secrets.OCR_LLM_URL_FALLBACK2 }}
+      OCR_LLM_AUTH_TOKEN_FALLBACK2: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 }}
