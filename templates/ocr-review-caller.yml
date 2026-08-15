@@ -1,0 +1,35 @@
+# OCR PR review — thin caller stub.
+#
+# Copy this file to .github/workflows/ocr-review.yml in any repo (or run
+# scripts/rollout-ocr.sh, which does it for you). All review logic lives in
+# the reusable workflow in Beau-s-Dev-Org/beau-dev-blueprint — this stub only
+# declares the triggers and forwards the repo's secrets.
+#
+# Per-repo config required (Settings -> Secrets and variables -> Actions):
+#   secret    OCR_LLM_URL          secret    OCR_LLM_AUTH_TOKEN
+#   variable  OCR_LLM_MODEL
+# Optional fallback backends: the same trio (plus optional
+# OCR_LLM_USE_ANTHROPIC_FALLBACKn variable) suffixed _FALLBACK1 / _FALLBACK2.
+# Full documentation is in the reusable workflow's header comment.
+
+name: OpenCodeReview PR Review
+
+# pull_request_target (not pull_request) so secrets are available even for
+# PRs opened from forks. Safe because OCR only reads the diff and does not
+# execute any code from the PR. synchronize re-reviews on every new commit;
+# the issue_comment trigger allows manual /open-code-review re-runs (gated to
+# MEMBER/OWNER/COLLABORATOR inside the reusable workflow).
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ocr:
+    uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@main
+    secrets: inherit
