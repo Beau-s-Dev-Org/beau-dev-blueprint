@@ -54,9 +54,21 @@ fi
 
 STUB_RENDERED="$(mktemp)"
 trap 'rm -f "$STUB_RENDERED"' EXIT
-sed -E "s|(ocr-review\.yml)@[0-9a-fA-F]{40}.*$|\1@${BLUEPRINT_SHA}  # ${BLUEPRINT_LABEL}|" \
+# Substitute the pin AND drop the manual-copy NOTE. That note tells a human the
+# SHA is a placeholder, which is true of the template and false of every
+# stamped stub — leaving it in shipped a comment that contradicted the line
+# below it, and a reviewer reading the stub cannot tell a real pin from an
+# unstamped one (three OCR findings across two repos said exactly that).
+sed -E \
+  -e "s|(ocr-review\.yml)@[0-9a-fA-F]{40}.*$|\1@${BLUEPRINT_SHA}  # ${BLUEPRINT_LABEL}|" \
+  -e '/^# NOTE for manual copies:/,/^# keeping the trailing/d' \
   "$STUB_PATH" > "$STUB_RENDERED"
 grep -q "@${BLUEPRINT_SHA}" "$STUB_RENDERED" || { echo "stub pin substitution failed" >&2; exit 1; }
+grep -q 'NOTE for manual copies' "$STUB_RENDERED" && { echo "manual-copy note survived stamping" >&2; exit 1; }
+# The pin is only protective if it names a real commit; a typo'd or stale SHA
+# fails at workflow-load time, silently removing the review gate.
+gh api "repos/${BLUEPRINT_REPO}/commits/${BLUEPRINT_SHA}" --jq .sha >/dev/null \
+  || { echo "pinned SHA ${BLUEPRINT_SHA} does not resolve in ${BLUEPRINT_REPO}" >&2; exit 1; }
 echo "pinning stubs to ${BLUEPRINT_REPO}@${BLUEPRINT_SHA} (${BLUEPRINT_LABEL})"
 STUB_PATH="$STUB_RENDERED"
 
