@@ -23,6 +23,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STUB_PATH="${SCRIPT_DIR}/../templates/ocr-review-caller.yml"
 STUB_BRANCH="chore/ocr-review-stub"
 WORKFLOW_PATH=".github/workflows/ocr-review.yml"
+BLUEPRINT_REPO="Beau-s-Dev-Org/beau-dev-blueprint"
+# Which blueprint commit the stubs pin to. Override to roll out a specific
+# reviewed commit; defaults to the current tip of the blueprint's default
+# branch. Re-running the script with a newer ref is how a blueprint change
+# propagates — the pin is what keeps that propagation reviewed rather than
+# automatic (BEA-381).
+BLUEPRINT_REF="${BLUEPRINT_REF:-main}"
 
 [ $# -ge 1 ] || { echo "usage: $0 owner/repo [owner/repo ...]" >&2; exit 2; }
 [ -f "$STUB_PATH" ] || { echo "stub not found: $STUB_PATH" >&2; exit 2; }
@@ -30,6 +37,40 @@ WORKFLOW_PATH=".github/workflows/ocr-review.yml"
 : "${OCR_LLM_URL:?export OCR_LLM_URL first}"
 : "${OCR_LLM_AUTH_TOKEN:?export OCR_LLM_AUTH_TOKEN first}"
 : "${OCR_LLM_MODEL:?export OCR_LLM_MODEL first}"
+
+# Resolve the blueprint ref to an immutable SHA and stamp it into the stub.
+# Consuming repos must never carry a mutable @branch reference: the called
+# workflow receives LLM credentials and runs with pull-requests: write.
+BLUEPRINT_SHA="$(gh api "repos/${BLUEPRINT_REPO}/commits/${BLUEPRINT_REF}" --jq .sha)"
+[ ${#BLUEPRINT_SHA} -eq 40 ] || { echo "could not resolve ${BLUEPRINT_REF} to a full SHA" >&2; exit 1; }
+# Human-readable trailing comment: the tag pointing at this commit if there is
+# one, else the commit's own date. Consumers' pinning guards require a
+# `# <version-or-date>` comment so a wall of hex stays reviewable.
+BLUEPRINT_LABEL="$(gh api "repos/${BLUEPRINT_REPO}/tags" --jq \
+  --arg sha "$BLUEPRINT_SHA" 'map(select(.commit.sha == $sha)) | .[0].name // empty' 2>/dev/null || true)"
+if [ -z "$BLUEPRINT_LABEL" ]; then
+  BLUEPRINT_LABEL="$(gh api "repos/${BLUEPRINT_REPO}/commits/${BLUEPRINT_SHA}" --jq '.commit.committer.date[0:10]')"
+fi
+
+STUB_RENDERED="$(mktemp)"
+trap 'rm -f "$STUB_RENDERED"' EXIT
+# Substitute the pin AND drop the manual-copy NOTE. That note tells a human the
+# SHA is a placeholder, which is true of the template and false of every
+# stamped stub — leaving it in shipped a comment that contradicted the line
+# below it, and a reviewer reading the stub cannot tell a real pin from an
+# unstamped one (three OCR findings across two repos said exactly that).
+sed -E \
+  -e "s|(ocr-review\.yml)@[0-9a-fA-F]{40}.*$|\1@${BLUEPRINT_SHA}  # ${BLUEPRINT_LABEL}|" \
+  -e '/^# NOTE for manual copies:/,/^# keeping the trailing/d' \
+  "$STUB_PATH" > "$STUB_RENDERED"
+grep -q "@${BLUEPRINT_SHA}" "$STUB_RENDERED" || { echo "stub pin substitution failed" >&2; exit 1; }
+grep -q 'NOTE for manual copies' "$STUB_RENDERED" && { echo "manual-copy note survived stamping" >&2; exit 1; }
+# The pin is only protective if it names a real commit; a typo'd or stale SHA
+# fails at workflow-load time, silently removing the review gate.
+gh api "repos/${BLUEPRINT_REPO}/commits/${BLUEPRINT_SHA}" --jq .sha >/dev/null \
+  || { echo "pinned SHA ${BLUEPRINT_SHA} does not resolve in ${BLUEPRINT_REPO}" >&2; exit 1; }
+echo "pinning stubs to ${BLUEPRINT_REPO}@${BLUEPRINT_SHA} (${BLUEPRINT_LABEL})"
+STUB_PATH="$STUB_RENDERED"
 
 set_secret()   { printf %s "$2" | gh secret set "$1" -R "$3"; }
 set_variable() { gh variable set "$1" -R "$3" --body "$2"; }

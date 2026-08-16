@@ -20,7 +20,14 @@ applies to every repo on its next run.
 
 **Adopt it in a repo** (two ways):
 
-1. Run the rollout script — sets the secrets/variables and opens a PR with the stub:
+The stub pins the reusable workflow to a **full commit SHA**, never `@main`: the called
+workflow receives LLM credentials and runs with `pull-requests: write`, so a mutable branch
+reference would let a push here change privileged code in every consuming repo with no review
+there (BEA-381; the tj-actions/changed-files precedent). Centralized updates survive the pin
+because re-stamping every repo is one command — re-run the rollout script after merging a
+blueprint change, optionally with `BLUEPRINT_REF=<sha-or-tag>`.
+
+1. Run the rollout script — resolves the pin, sets the secrets/variables, and opens a PR with the stub:
    ```bash
    export OCR_LLM_URL='https://ollama.com/v1'
    export OCR_LLM_AUTH_TOKEN='...'
