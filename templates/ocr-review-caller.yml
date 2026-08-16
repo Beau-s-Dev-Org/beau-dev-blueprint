@@ -15,13 +15,22 @@
 # Secrets are passed EXPLICITLY (no `secrets: inherit`) so the called workflow
 # only ever sees the OCR credentials, never this repo's other secrets.
 #
-# The @main reference is deliberate, not an oversight: the blueprint repo and
-# this repo share one owner, blueprint main is ruleset-protected (PR-only, no
-# force push, no deletion), and pinning a SHA here would defeat the
-# edit-once-applies-everywhere purpose of centralizing the workflow.
+# The reusable workflow is pinned to a full commit SHA, not @main: a branch is
+# a mutable pointer, and this job forwards LLM credentials while holding
+# pull-requests: write, so a push to blueprint main would otherwise change
+# privileged code running here with no review in this repo (the BEA-381
+# rationale, and the tj-actions/changed-files precedent). Centralized updates
+# survive the pin because re-stamping every consuming repo is one command:
+# scripts/rollout-ocr.sh resolves the blueprint ref and rewrites this line.
+#
 # Job-level per-PR concurrency (cancel-in-progress) and a 65-minute job
 # timeout with 20-minute per-attempt step timeouts are all defined in the
 # reusable workflow.
+#
+# NOTE for manual copies: the SHA below is a placeholder. Either run
+# scripts/rollout-ocr.sh (which substitutes the real pin), or replace it with
+#   gh api repos/Beau-s-Dev-Org/beau-dev-blueprint/commits/main --jq .sha
+# keeping the trailing `# <version-or-date>` comment.
 
 name: OpenCodeReview PR Review
 
@@ -44,7 +53,7 @@ permissions:
 
 jobs:
   ocr:
-    uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@main
+    uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@0000000000000000000000000000000000000000  # 0000-00-00 placeholder — see NOTE above
     with:
       llm_model: ${{ vars.OCR_LLM_MODEL }}
       llm_model_fallback1: ${{ vars.OCR_LLM_MODEL_FALLBACK1 }}
