@@ -25,6 +25,17 @@
 # fallback is skipped rather than failing on auth with a confusing message.
 # Leaving fallbacks unconfigured changes nothing.
 #
+# Fallback attempts set upload_artifacts: 'false'. The action names its
+# artifact ocr-review-result-<run_id>-<run_attempt>; a fallback runs in the
+# SAME job as the failed primary, so both attempts compute the same name and
+# the fallback's upload 409s ("artifact with this name already exists") —
+# which failed the whole composite AFTER a completed review, so a fully
+# successful fallback review still read as a failed attempt: the gate turned
+# the job red and the computed comments were never posted (observed live on
+# marketing-as-code PR #302 during the 2026-08-20 primary-provider outage).
+# The fallback's result JSON is still printed to the job log by the action;
+# only the downloadable artifact is given up, and only on the fallback path.
+#
 # The OCR action is pinned to a commit SHA (not @main) since it runs with
 # pull-requests: write and handles LLM/GitHub credentials.
 
@@ -205,6 +216,11 @@ jobs:
           llm_model: ${{ inputs.llm_model_fallback1 }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback1 || 'false' }}
           ocr_version: '1.8.6'
+          # See the fallback-semantics note in the header: the primary
+          # attempt already uploaded ocr-review-result-<run_id>-<attempt>,
+          # and a second upload under the same name 409s and fails the
+          # composite after a COMPLETED review.
+          upload_artifacts: 'false'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
@@ -226,6 +242,8 @@ jobs:
           llm_model: ${{ inputs.llm_model_fallback2 }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback2 || 'false' }}
           ocr_version: '1.8.6'
+          # Same artifact-name conflict as fallback 1.
+          upload_artifacts: 'false'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
