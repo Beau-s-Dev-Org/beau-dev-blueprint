@@ -66,7 +66,7 @@ def main():
     content = strip_code_fence(raw)
 
     # 4. Parse and Create Issues
-    tasks_data = json.loads(content)
+    tasks_data = json.loads(content, strict=False)
     
     # Handle both a list directly or a 'tasks' wrapper
     if isinstance(tasks_data, dict):

@@ -12,7 +12,7 @@ REPO = os.environ["REPO"]
 
 # The review model has a large context window; 8000 chars keeps the prompt
 # well within limits while covering the most meaningful parts of most PR diffs.
-MAX_DIFF_CHARS = 8000
+MAX_DIFF_CHARS = int(os.getenv("MAX_DIFF_CHARS", "60000"))
 
 # ── Loop-safety controls ────────────────────────────────────────────────────
 # How many completed automated review cycles to allow before escalating to the
@@ -188,6 +188,21 @@ def main():
         return
 
     truncated_diff = diff[:MAX_DIFF_CHARS]
+    # If the diff is cut, SAY SO. A model handed a diff that stops mid-token
+    # reports the cut as a syntax error in the source — observed live on this
+    # PR, where a truncated `_classify` was reported as an unterminated string
+    # literal in a file that parses cleanly. An unflagged truncation turns a
+    # review into confident fiction.
+    truncation_notice = ""
+    if len(diff) > MAX_DIFF_CHARS:
+        truncation_notice = (
+            f"\nNOTE: this diff was truncated at {MAX_DIFF_CHARS} of {len(diff)} "
+            f"characters. It may stop mid-line or mid-token. Do NOT report the "
+            f"truncation point as a syntax error, an unterminated string, or an "
+            f"incomplete function — that is an artifact of this excerpt, not the "
+            f"source. Review only what is fully shown.\n"
+        )
+        print(f"✂️  Diff truncated: {len(diff)} -> {MAX_DIFF_CHARS} chars (model told).")
 
     # ── Model selection with escalation ─────────────────────────────────────
     # No model is named here. The primary provider is a router (openrouter/auto
@@ -229,7 +244,7 @@ Return a JSON object with exactly two keys:
   - "area": One of "bug", "security", "performance", "code-quality", or "testing".
 
 If no actionable issues are found, return an empty "issues" array.
-{repetition_guidance}
+{repetition_guidance}{truncation_notice}
 DIFF:
 {truncated_diff}
 """
@@ -269,7 +284,7 @@ DIFF:
     model_name = provider["model"]
     content = strip_code_fence(raw)
     try:
-        result = json.loads(content)
+        result = json.loads(content, strict=False)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Model returned invalid JSON: {e}\nRaw content: {content}") from e
 

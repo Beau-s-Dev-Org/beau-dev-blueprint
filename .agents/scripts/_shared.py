@@ -17,7 +17,7 @@ import requests
 # which puts the payload on the same line as the opening fence does not have
 # its payload swallowed by the tag.
 _FENCED = re.compile(
-    r"^```[A-Za-z0-9_+-]*"      # opening fence + optional language tag
+    r"^```[ \t]*[A-Za-z0-9_+-]*[ \t]*"   # fence, optional spaces, optional tag
     r"\n?"                      # optional newline after the fence
     r"(?P<body>.*?)"            # payload, non-greedy
     r"\n?```\s*$",              # closing fence, own line or glued to payload
@@ -28,7 +28,7 @@ _FENCED = re.compile(
 # language tag is removed there too. Matching this separately (rather than
 # slicing three characters) is what makes ```json{...} with no newline and no
 # closing fence strip to {...} instead of json{...}.
-_OPENING = re.compile(r"^```[A-Za-z0-9_+-]*\n?")
+_OPENING = re.compile(r"^```[ \t]*[A-Za-z0-9_+-]*[ \t]*\n?")
 
 
 def strip_code_fence(content):
@@ -266,6 +266,8 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
         "both fences glued, no newlines": f"```json{_P}```",
         "unterminated fence": f"```json\n{_P}",
         "unterminated, tag, no newline": f"```json{_P}",
+        "space before language tag": f"``` json\n{_P}\n```",
+        "multiple spaces before tag": f"```   json\n{_P}\n```",
         "surrounding whitespace": f"\n\n  ```json\n{_P}\n```  \n",
         "payload contains a fence": f"```json\n{_EMBEDDED}\n```",
         "bare payload contains a fence": _EMBEDDED,
