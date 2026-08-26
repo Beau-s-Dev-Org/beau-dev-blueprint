@@ -361,8 +361,30 @@ def _coerce_shape(parsed, expect, require_keys=None):
     return parsed, None
 
 
+def list_of_objects(value, key=None):
+    """Return an error string unless `value` (or value[key]) is a list of dicts.
+
+    Written as a helper because both scripts need the same contract: a field
+    that will be iterated and whose elements will be subscripted must actually
+    be a list of objects. A string passes `len()` and iterates — into
+    characters — which is how "no issues found" became fifteen findings.
+    """
+    target = value.get(key) if key else value
+    if target is None:
+        return None                      # absent is fine; callers default it
+    if not isinstance(target, list):
+        label = f"'{key}'" if key else "value"
+        return f"{label} is a JSON {type(target).__name__}, expected a list"
+    bad = [i for i, item in enumerate(target) if not isinstance(item, dict)]
+    if bad:
+        label = f"'{key}'" if key else "value"
+        return (f"{label} contains non-object entries at index "
+                f"{bad[0]} (a JSON {type(target[bad[0]]).__name__})")
+    return None
+
+
 def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None,
-                  require_keys=None):
+                  require_keys=None, validate=None):
     """Call providers until one returns output that actually parses as JSON.
 
     A 200 response carrying unparseable content used to be treated as success,
@@ -372,6 +394,13 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
     string values, and an unbalanced delimiter — which is the signal to stop
     patching the parser and treat unparseable output as what it is: that
     provider failing to answer.
+
+    `validate` makes CONTENT part of succeeding as well. Shape alone is not
+    enough: a response can be a perfectly good object with `issues` set to a
+    string, and the consumer then reports len("no issues found") == 15
+    actionable findings and iterates it character by character. A validator
+    returns an error string for anything it cannot use, and that tier fails
+    over like any other failure.
 
     `expect` ("object" or "array") makes SHAPE part of succeeding too. A
     response of the wrong shape is exactly as unusable to the caller as one
@@ -417,6 +446,10 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
                 continue
             if expect:
                 value, shape_error = _coerce_shape(value, expect, require_keys)
+                if shape_error:
+                    continue
+            if validate:
+                shape_error = validate(value)
                 if shape_error:
                     continue
             parsed = value
@@ -556,4 +589,27 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
             print(f"  FAIL  could not recover from {_raw!r}")
             _failures += 1
     print(f"{len(_CANDIDATE_CASES)} candidate-scan cases checked")
+
+    # Content contracts. Shape alone is not enough: a well-formed envelope whose
+    # `issues` is a string passes every structural check, and the consumer then
+    # reports len("no issues found") == 15 findings and iterates it character by
+    # character, creating a GitHub issue per letter.
+    _CONTENT_CASES = [
+        ("list of objects", {"issues": [{"a": 1}]}, "issues", False),
+        ("string instead of list", {"issues": "no issues found"}, "issues", True),
+        ("dict instead of list", {"issues": {"title": "x"}}, "issues", True),
+        ("list of strings", {"issues": ["a", "b"]}, "issues", True),
+        ("key absent is fine", {"summary": "s"}, "issues", False),
+        ("empty list is fine", {"issues": []}, "issues", False),
+        ("bare list of objects", [{"task": "a"}], None, False),
+        ("bare list of strings", ["a", "b"], None, True),
+    ]
+    for _name, _value, _key, _should_error in _CONTENT_CASES:
+        _err = list_of_objects(_value, _key)
+        if bool(_err) == _should_error:
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: error={_err!r}")
+            _failures += 1
+    print(f"{len(_CONTENT_CASES)} content contracts checked")
     raise SystemExit(1 if _failures else 0)

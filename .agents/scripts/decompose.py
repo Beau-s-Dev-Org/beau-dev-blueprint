@@ -6,7 +6,7 @@ from datetime import datetime
 
 import yaml
 
-from _shared import AllProvidersFailed, call_json_llm
+from _shared import AllProvidersFailed, call_json_llm, list_of_objects
 
 
 def create_issue(task):
@@ -48,7 +48,14 @@ def main():
         f"title and 'description' for the details: {proposal_content}"
     )
     try:
-        tasks_data, provider = call_json_llm("DECOMP", prompt)
+        tasks_data, provider = call_json_llm(
+            "DECOMP", prompt,
+            # Accepts a bare array of tasks or a {"tasks": [...]} wrapper, so
+            # validate whichever the model sent. Without this a string reaches
+            # the create_issue loop and is iterated character by character.
+            validate=lambda v: (list_of_objects(v, "tasks")
+                                if isinstance(v, dict) else list_of_objects(v)),
+        )
     except AllProvidersFailed as e:
         # Fail loudly and specifically. A decomposition that silently produced
         # no tasks would look identical to a proposal with nothing to do.

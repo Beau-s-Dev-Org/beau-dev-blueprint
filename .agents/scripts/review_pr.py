@@ -3,7 +3,7 @@ import subprocess
 
 import requests
 
-from _shared import AllProvidersFailed, call_json_llm
+from _shared import AllProvidersFailed, call_json_llm, list_of_objects
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 PR_NUMBER = os.environ["PR_NUMBER"]
@@ -253,7 +253,8 @@ DIFF:
 
     try:
         result, provider = call_json_llm("REVIEW", prompt, model_override=model_override,
-                                          expect="object", require_keys=("summary", "issues"))
+                                          expect="object", require_keys=("summary", "issues"),
+                                          validate=lambda v: list_of_objects(v, "issues"))
     except AllProvidersFailed as e:
         # Every configured provider failed. This must be unmistakable on the PR
         # itself, not just a traceback in the Actions log — a dead reviewer went
@@ -287,7 +288,7 @@ DIFF:
     model_name = provider["model"]
 
     summary = result.get("summary", "_No summary provided by the reviewer._")
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
 
     # Post the human-readable review as a PR comment.
     issue_count = len(issues)
