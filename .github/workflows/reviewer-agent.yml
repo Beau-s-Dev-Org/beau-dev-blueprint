@@ -3,6 +3,16 @@ name: Automated PR Review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  # On-demand trigger. Without this the reviewer could only ever run as a side
+  # effect of opening a PR, which is part of why a retired model went unnoticed
+  # for six weeks (BEA-428): there was no way to ask "does the reviewer still
+  # work?" short of raising a pull request. A PR number is required because the
+  # script reads the diff and posts its review there.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to review
+        required: true
 
 jobs:
   review:
@@ -78,6 +88,6 @@ jobs:
           # full state space rather than issue another narrow fix to a region
           # earlier rounds already touched.
           REPETITION_WARNING_AFTER_CYCLES: "2"
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           REPO: ${{ github.repository }}
         run: python .agents/scripts/review_pr.py
