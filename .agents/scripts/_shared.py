@@ -6,6 +6,7 @@ resolves. Keep this module free of side effects — no API clients, no env
 reads at import time — so importing it is always safe.
 """
 
+import json
 import os
 import re
 
@@ -202,7 +203,16 @@ def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
                            f"set LLM_URL / LLM_API_KEY / {purpose}_MODEL")]
         )
 
-    failures = []
+def _announce(provider):
+    """Say which tier actually served the result — only once it is usable."""
+    if provider["tier"] != "primary":
+        print(f"↩️  Primary unavailable; served by {provider['tier']} "
+              f"({provider['model']}).")
+
+
+def _call_one(providers, prompt, timeout, json_mode=True):
+    """Try each provider once; return (content, provider) or raise ProviderError."""
+    last = None
     for provider in providers:
         payload = {
             "model": provider["model"],
@@ -221,31 +231,128 @@ def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
                 timeout=timeout,
             )
         except requests.RequestException as exc:
-            failures.append(ProviderError(provider["tier"], provider["model"],
-                                          "endpoint unreachable", str(exc)))
-            print(f"⚠️  {failures[-1]}")
+            last = ProviderError(provider["tier"], provider["model"],
+                                 "endpoint unreachable", str(exc))
             continue
 
         if response.status_code != 200:
             body = (response.text or "")[:400]
-            failures.append(ProviderError(provider["tier"], provider["model"],
-                                          _classify(response.status_code, body), body))
-            print(f"⚠️  {failures[-1]}")
+            last = ProviderError(provider["tier"], provider["model"],
+                                 _classify(response.status_code, body), body)
             continue
 
         try:
             content = response.json()["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
-            failures.append(ProviderError(provider["tier"], provider["model"],
-                                          "unreadable response shape", str(exc)))
-            print(f"⚠️  {failures[-1]}")
+            last = ProviderError(provider["tier"], provider["model"],
+                                 "unreadable response shape", str(exc))
             continue
 
-        if provider["tier"] != "primary":
-            print(f"↩️  Primary unavailable; served by {provider['tier']} "
-                  f"({provider['model']}).")
         return content, provider
 
+    raise last
+
+
+def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
+    """Call the first provider that answers; return (content, provider)."""
+    providers = build_provider_chain(purpose, model_override)
+    if not providers:
+        raise AllProvidersFailed(
+            [ProviderError("primary", "<unset>", "not configured",
+                           f"set LLM_URL / LLM_API_KEY / {purpose}_MODEL")]
+        )
+    failures = []
+    for provider in providers:
+        try:
+            content, used = _call_one([provider], prompt, timeout, json_mode)
+            _announce(used)
+            return content, used
+        except ProviderError as exc:
+            failures.append(exc)
+            print(f"⚠️  {exc}")
+    raise AllProvidersFailed(failures)
+
+
+def extract_json_object(text):
+    """Return the outermost balanced {...} in `text`, or the text itself.
+
+    Models wrap the object in prose ("Here is the review:"), append a closing
+    remark, or both, even when asked for JSON only. Slicing to the outermost
+    balanced braces recovers the object in those cases. Quote- and
+    escape-aware, so a brace inside a string value does not end the scan.
+    """
+    stripped = strip_code_fence(text)
+    start = stripped.find("{")
+    if start == -1:
+        return stripped
+    depth = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(stripped[start:], start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return stripped[start:i + 1]
+    return stripped[start:]
+
+
+def call_json_llm(purpose, prompt, model_override=None, timeout=180):
+    """Call providers until one returns output that actually parses as JSON.
+
+    A 200 response carrying unparseable content used to be treated as success,
+    so a provider emitting malformed JSON was never retried elsewhere and the
+    run died. Three distinct parse failures were observed in consecutive review
+    rounds on this very PR — a ```json fence, raw control characters inside
+    string values, and an unbalanced delimiter — which is the signal to stop
+    patching the parser and treat unparseable output as what it is: that
+    provider failing to answer.
+
+    So parseability is part of a provider succeeding. Everything the parser can
+    reasonably absorb is absorbed first — a surrounding code fence, prose
+    around the object, and control characters inside strings (strict=False) —
+    and anything still unparseable advances to the next tier. If no configured
+    provider returns usable JSON, this raises AllProvidersFailed rather than
+    returning a partial or empty result.
+    """
+    providers = build_provider_chain(purpose, model_override)
+    if not providers:
+        raise AllProvidersFailed(
+            [ProviderError("primary", "<unset>", "not configured",
+                           f"set LLM_URL / LLM_API_KEY / {purpose}_MODEL")]
+        )
+
+    failures = []
+    for provider in providers:
+        single = [provider]
+        try:
+            raw, used = _call_one(single, prompt, timeout)
+        except ProviderError as exc:
+            failures.append(exc)
+            print(f"⚠️  {exc}")
+            continue
+        candidate = extract_json_object(raw)
+        try:
+            parsed = json.loads(candidate, strict=False)
+        except json.JSONDecodeError as exc:
+            failures.append(ProviderError(
+                provider["tier"], provider["model"], "returned unparseable JSON",
+                f"{exc} | first 200 chars: {candidate[:200]!r}"))
+            print(f"⚠️  {failures[-1]}")
+            continue
+        _announce(used)
+        return parsed, used
     raise AllProvidersFailed(failures)
 
 

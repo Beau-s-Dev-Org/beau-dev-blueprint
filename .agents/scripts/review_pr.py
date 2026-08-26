@@ -4,7 +4,7 @@ import subprocess
 
 import requests
 
-from _shared import AllProvidersFailed, call_llm, strip_code_fence
+from _shared import AllProvidersFailed, call_json_llm
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 PR_NUMBER = os.environ["PR_NUMBER"]
@@ -253,7 +253,7 @@ DIFF:
 """
 
     try:
-        raw, provider = call_llm("REVIEW", prompt, model_override=model_override)
+        result, provider = call_json_llm("REVIEW", prompt, model_override=model_override)
     except AllProvidersFailed as e:
         # Every configured provider failed. This must be unmistakable on the PR
         # itself, not just a traceback in the Actions log — a dead reviewer went
@@ -285,11 +285,6 @@ DIFF:
         raise RuntimeError(f"❌ NO REVIEW RAN: {e}") from e
 
     model_name = provider["model"]
-    content = strip_code_fence(raw)
-    try:
-        result = json.loads(content, strict=False)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Model returned invalid JSON: {e}\nRaw content: {content}") from e
 
     summary = result.get("summary", "_No summary provided by the reviewer._")
     issues = result.get("issues", [])

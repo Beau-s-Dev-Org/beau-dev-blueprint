@@ -7,7 +7,7 @@ from datetime import datetime
 
 import yaml
 
-from _shared import AllProvidersFailed, call_llm, strip_code_fence
+from _shared import AllProvidersFailed, call_json_llm
 
 
 def create_issue(task):
@@ -49,7 +49,7 @@ def main():
         f"title and 'description' for the details: {proposal_content}"
     )
     try:
-        raw, provider = call_llm("DECOMP", prompt)
+        tasks_data, provider = call_json_llm("DECOMP", prompt)
     except AllProvidersFailed as e:
         # Fail loudly and specifically. A decomposition that silently produced
         # no tasks would look identical to a proposal with nothing to do.
@@ -63,10 +63,8 @@ def main():
     model_name = provider["model"]
 
     # 3. Clean up the response (Remove Markdown backticks if present)
-    content = strip_code_fence(raw)
 
     # 4. Parse and Create Issues
-    tasks_data = json.loads(content, strict=False)
     
     # Handle both a list directly or a 'tasks' wrapper
     if isinstance(tasks_data, dict):
