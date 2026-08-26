@@ -35,9 +35,16 @@ REVIEW_MARKER = "## 🤖 Automated PR Review"
 # and turn "no review ran" into a green check with no review behind it, which
 # is the exact defect BEA-428 exists to remove.
 NOTICE_MARKER = "## ⚠️ Automated Review Notice"
-assert not NOTICE_MARKER.startswith(REVIEW_MARKER), (
-    "NOTICE_MARKER must not share REVIEW_MARKER's prefix — see BEA-428."
-)
+if NOTICE_MARKER.startswith(REVIEW_MARKER):
+    # Not an assert: asserts are stripped under `python -O`, which would remove
+    # the guard on a P1 invariant without a word — the same silent-degradation
+    # shape this module exists to prevent.
+    raise RuntimeError(
+        "NOTICE_MARKER must not share REVIEW_MARKER's prefix: cycle counting "
+        "uses str.startswith, so a shared prefix makes a failed review count as "
+        "a completed one and eventually trips the circuit breaker into passing "
+        "with no review behind it (BEA-428)."
+    )
 
 client = Client(
     host="https://ollama.com",
