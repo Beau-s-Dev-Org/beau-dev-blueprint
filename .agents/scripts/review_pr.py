@@ -18,10 +18,26 @@ MAX_DIFF_CHARS = 8000
 # How many completed automated review cycles to allow before escalating to the
 # stronger model. When cycle_count reaches this value the escalation kicks in
 # (e.g. 2 = escalate when cycle_count reaches 2, i.e. on the 3rd cycle).
-ESCALATE_AFTER_CYCLES = int(os.getenv("ESCALATE_AFTER_CYCLES", "2"))
-# Hard cap: after this many completed cycles the loop is stopped entirely to
-# prevent runaway token consumption.
-MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "3"))
+ESCALATE_AFTER_CYCLES = int(os.getenv("ESCALATE_AFTER_CYCLES", "5"))
+# Hard cap: after this many completed cycles the loop stops entirely, to bound
+# token consumption on a PR that is genuinely not converging.
+#
+# This was 3, which was far below observed reality and truncated legitimate
+# review. Real round counts on substantial PRs in the consuming repos:
+# 24 rounds (marketing-as-code PR #224 / BEA-250), 23 (BEA-374), 13 (BEA-413),
+# 9 (BEA-304). A cap of 3 stopped at roughly an eighth of the observed maximum
+# and read, from the outside, exactly like a completed review — the breaker
+# posts a notice and the check goes green.
+#
+# 25 covers the worst case seen so far with a little headroom. The cap exists
+# for a genuinely non-converging PR, not as a review budget.
+MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "25"))
+# After this many cycles, a PR is being re-reviewed enough that repetition is
+# the real risk rather than volume. Nine of PR #224's 24 rounds re-patched the
+# same ~30 lines, and a defect introduced by one of those narrow patches
+# survived an extra full round. Past this threshold the reviewer is told to
+# enumerate the state space instead of issuing another one-line fix.
+REPETITION_WARNING_AFTER_CYCLES = int(os.getenv("REPETITION_WARNING_AFTER_CYCLES", "2"))
 # Sentinel string used to identify COMPLETED automated review comments when
 # counting cycles. Only a comment representing a real, model-backed review may
 # carry this prefix.
@@ -187,6 +203,21 @@ def main():
     else:
         print(f"🤖 Reviewing (cycle {cycle_count + 1}).")
 
+    # Repeated-patch discipline. When a PR has already been round-tripped
+    # several times, the failure mode stops being "missed a bug" and becomes
+    # "keeps re-patching one region one line at a time". Telling the reviewer
+    # this explicitly is the cheapest place to apply the rule.
+    repetition_guidance = ""
+    if cycle_count >= REPETITION_WARNING_AFTER_CYCLES:
+        repetition_guidance = (
+            f"\nIMPORTANT — this PR has already been through {cycle_count} automated "
+            f"review cycle(s). If you are about to flag a function or region that "
+            f"earlier rounds already changed, do NOT propose another narrow fix. "
+            f"Enumerate every state and input shape that code must handle, say which "
+            f"ones are unhandled, and propose one change covering all of them. A "
+            f"sequence of one-line fixes to the same region is itself the defect.\n"
+        )
+
     prompt = f"""You are an expert code reviewer. Review the following pull request diff.
 
 Return a JSON object with exactly two keys:
@@ -198,7 +229,7 @@ Return a JSON object with exactly two keys:
   - "area": One of "bug", "security", "performance", "code-quality", or "testing".
 
 If no actionable issues are found, return an empty "issues" array.
-
+{repetition_guidance}
 DIFF:
 {truncated_diff}
 """
