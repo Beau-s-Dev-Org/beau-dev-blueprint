@@ -1,12 +1,14 @@
-from _shared import strip_code_fence
-import os
 import json
-import sys
+import os
 import shutil
 import subprocess
-import yaml
+import sys
 from datetime import datetime
+
+import yaml
 from ollama import Client
+
+from _shared import strip_code_fence
 
 # 1. Setup the Cloud Connection
 client = Client(

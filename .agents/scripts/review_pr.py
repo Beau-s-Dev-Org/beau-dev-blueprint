@@ -1,8 +1,11 @@
 import json
 import os
 import subprocess
+
 import requests
 from ollama import Client
+
+from _shared import strip_code_fence
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 OLLAMA_CLOUD_API_KEY = os.environ["OLLAMA_CLOUD_API_KEY"]
@@ -35,8 +38,6 @@ NOTICE_MARKER = "## ⚠️ Automated Review Notice"
 assert not NOTICE_MARKER.startswith(REVIEW_MARKER), (
     "NOTICE_MARKER must not share REVIEW_MARKER's prefix — see BEA-428."
 )
-
-from _shared import strip_code_fence
 
 client = Client(
     host="https://ollama.com",
