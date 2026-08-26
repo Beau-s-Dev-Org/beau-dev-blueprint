@@ -188,21 +188,6 @@ def _classify(status, body):
     return f"HTTP {status}" if status else "request failed"
 
 
-def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
-    """Call the first provider that answers; return (content, provider).
-
-    Raises AllProvidersFailed when every configured tier fails, with a per-tier
-    reason. It never returns a sentinel or an empty string on failure: a caller
-    must not be able to mistake "no provider answered" for "the model had
-    nothing to say" — that conflation is the defect BEA-428 exists to remove.
-    """
-    providers = build_provider_chain(purpose, model_override)
-    if not providers:
-        raise AllProvidersFailed(
-            [ProviderError("primary", "<unset>", "not configured",
-                           f"set LLM_URL / LLM_API_KEY / {purpose}_MODEL")]
-        )
-
 def _announce(provider):
     """Say which tier actually served the result — only once it is usable."""
     if provider["tier"] != "primary":
@@ -211,7 +196,15 @@ def _announce(provider):
 
 
 def _call_one(providers, prompt, timeout, json_mode=True):
-    """Try each provider once; return (content, provider) or raise ProviderError."""
+    """Try each provider once; return (content, provider) or raise ProviderError.
+
+    Callers pass a non-empty list, but an empty one must not surface as
+    `raise None` — a TypeError from the error path is strictly worse than the
+    error it was trying to report.
+    """
+    if not providers:
+        raise ProviderError("<none>", "<none>", "no provider supplied",
+                            "_call_one received an empty provider list")
     last = None
     for provider in providers:
         payload = {
@@ -254,7 +247,13 @@ def _call_one(providers, prompt, timeout, json_mode=True):
 
 
 def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
-    """Call the first provider that answers; return (content, provider)."""
+    """Call the first provider that answers; return (content, provider).
+
+    Raises AllProvidersFailed when every configured tier fails, with a per-tier
+    reason. It never returns a sentinel or an empty string on failure: a caller
+    must not be able to mistake "no provider answered" for "the model had
+    nothing to say" — that conflation is the defect BEA-428 exists to remove.
+    """
     providers = build_provider_chain(purpose, model_override)
     if not providers:
         raise AllProvidersFailed(
