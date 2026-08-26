@@ -371,7 +371,11 @@ def list_of_objects(value, key=None):
     """
     target = value.get(key) if key else value
     if target is None:
-        return None                      # absent is fine; callers default it
+        # Absent (or null) is fine ONLY because review_pr.py defaults it to [].
+        # A caller whose default does something else — decompose.py wraps the
+        # whole object as a single task — must not use this helper; see
+        # decomposition_tasks below.
+        return None
     if not isinstance(target, list):
         label = f"'{key}'" if key else "value"
         return f"{label} is a JSON {type(target).__name__}, expected a list"
@@ -380,6 +384,43 @@ def list_of_objects(value, key=None):
         label = f"'{key}'" if key else "value"
         return (f"{label} contains non-object entries at index "
                 f"{bad[0]} (a JSON {type(target[bad[0]]).__name__})")
+    return None
+
+
+def decomposition_tasks(value):
+    """Validate a decomposition payload, including the tasks themselves.
+
+    decompose.py accepts a bare array of tasks or a {"tasks": [...]} wrapper,
+    and when neither is present it wraps the whole object as ONE task. That
+    default is why list_of_objects is not sufficient here: it treats a missing
+    key and an explicit null alike, so two unusable envelopes sailed through to
+    the consumer and died there instead of failing over —
+
+        {"tasks": null}                 -> tasks is None -> TypeError on iterate
+        {"error": "unable to decompose"} -> wrapped as one task -> KeyError 'task'
+
+    create_issue subscripts task['task'] directly for the issue title, so a
+    task without it is not a degraded issue, it is a crash. Both cases now fail
+    the provider and try the next tier.
+    """
+    if isinstance(value, dict):
+        if "tasks" in value:
+            if not isinstance(value["tasks"], list):
+                return (f"'tasks' is a JSON {type(value['tasks']).__name__}, "
+                        "expected a list")
+            items = value["tasks"]
+        else:
+            items = [value]          # decompose wraps a bare object as one task
+    elif isinstance(value, list):
+        items = value
+    else:
+        return f"a JSON {type(value).__name__}, expected an object or array"
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            return (f"task {index} is a JSON {type(item).__name__}, "
+                    "expected an object")
+        if not item.get("task"):
+            return f"task {index} has no usable 'task' field"
     return None
 
 
@@ -621,4 +662,30 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
             print(f"  FAIL  {_name}: error={_err!r}")
             _failures += 1
     print(f"{len(_CONTENT_CASES)} content contracts checked")
+
+    # Decomposition envelopes. create_issue subscripts task['task'] for the
+    # issue title, so a task without it is a crash, not a degraded issue — and
+    # a crash in the consumer bypasses the provider chain entirely.
+    _DECOMP_CASES = [
+        ("tasks null", {"tasks": None}, True),
+        ("error envelope", {"error": "unable to decompose"}, True),
+        ("tasks is a string", {"tasks": "none"}, True),
+        ("task missing 'task'", {"tasks": [{"description": "d"}]}, True),
+        ("task is a string", {"tasks": ["do a thing"]}, True),
+        ("empty task title", {"tasks": [{"task": ""}]}, True),
+        ("bare array of strings", ["a", "b"], True),
+        ("scalar response", "nope", True),
+        ("valid wrapper", {"tasks": [{"task": "a"}, {"task": "b"}]}, False),
+        ("valid bare array", [{"task": "a"}], False),
+        ("valid single task object", {"task": "just one"}, False),
+        ("empty task list allowed", {"tasks": []}, False),
+    ]
+    for _name, _value, _should_error in _DECOMP_CASES:
+        _err = decomposition_tasks(_value)
+        if bool(_err) == _should_error:
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: error={_err!r}")
+            _failures += 1
+    print(f"{len(_DECOMP_CASES)} decomposition contracts checked")
     raise SystemExit(1 if _failures else 0)
