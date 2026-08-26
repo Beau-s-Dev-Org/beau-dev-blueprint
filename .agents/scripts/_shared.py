@@ -512,9 +512,18 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
         "object": ('{"summary":"ok","issues":[]}', None),
         "object containing an array": ('{"issues":[{"a":1},{"b":2}]}', None),
     }
+    def _first_json(text):
+        """First candidate that parses — what call_json_llm does without shape rules."""
+        for _c in iter_json_candidates(text):
+            try:
+                return json.loads(_c, strict=False)
+            except json.JSONDecodeError:
+                continue
+        raise ValueError("no parseable JSON candidate")
+
     for _name, (_raw, _expected) in _VALUE_CASES.items():
         try:
-            _parsed = json.loads(extract_json_value(_raw), strict=False)
+            _parsed = _first_json(_raw)
             _got = len(_parsed) if isinstance(_parsed, list) else None
             if _got == _expected:
                 print(f"  ok    {_name}")

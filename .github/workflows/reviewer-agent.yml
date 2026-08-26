@@ -25,6 +25,14 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
+      - name: Verify shared parsing self-check
+        # A self-check nothing runs is the same false assurance this pipeline
+        # exists to remove. It caught nothing when extract_json_value was
+        # renamed out from under it and the block sat broken for three commits.
+        # Two seconds here, and a broken parser contract fails before any model
+        # is called.
+        run: python .agents/scripts/_shared.py
+
       - name: Run PR Reviewer Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
