@@ -252,7 +252,7 @@ DIFF:
 """
 
     try:
-        result, provider = call_json_llm("REVIEW", prompt, model_override=model_override)
+        result, provider = call_json_llm("REVIEW", prompt, model_override=model_override, expect="object")
     except AllProvidersFailed as e:
         # Every configured provider failed. This must be unmistakable on the PR
         # itself, not just a traceback in the Actions log — a dead reviewer went

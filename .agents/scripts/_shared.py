@@ -319,7 +319,25 @@ def extract_json_value(text):
     return stripped[start:]
 
 
-def call_json_llm(purpose, prompt, model_override=None, timeout=180):
+def _coerce_shape(parsed, expect):
+    """Return (value, error). error is None when the shape is usable.
+
+    A single object wrapped in a one-element array is unwrapped: models do this
+    routinely and the intent is unambiguous. Anything else of the wrong shape is
+    reported so the caller can advance to the next provider.
+    """
+    if expect == "object":
+        if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+            return parsed[0], None
+        if not isinstance(parsed, dict):
+            return parsed, f"a JSON {type(parsed).__name__}"
+    elif expect == "array":
+        if not isinstance(parsed, list):
+            return parsed, f"a JSON {type(parsed).__name__}"
+    return parsed, None
+
+
+def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None):
     """Call providers until one returns output that actually parses as JSON.
 
     A 200 response carrying unparseable content used to be treated as success,
@@ -329,6 +347,14 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180):
     string values, and an unbalanced delimiter — which is the signal to stop
     patching the parser and treat unparseable output as what it is: that
     provider failing to answer.
+
+    `expect` ("object" or "array") makes SHAPE part of succeeding too. A
+    response of the wrong shape is exactly as unusable to the caller as one
+    that will not parse, and letting it through only moves the failure into the
+    consumer — where `result.get(...)` on a list raises AttributeError and
+    bypasses the clean failure notice this module exists to guarantee. Models
+    commonly wrap a single object in a one-element array; that specific case is
+    unwrapped rather than rejected, since the intent is unambiguous.
 
     So parseability is part of a provider succeeding. Everything the parser can
     reasonably absorb is absorbed first — a surrounding code fence, prose
@@ -362,6 +388,15 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180):
                 f"{exc} | first 200 chars: {candidate[:200]!r}"))
             print(f"⚠️  {failures[-1]}")
             continue
+        if expect:
+            parsed, shape_error = _coerce_shape(parsed, expect)
+            if shape_error:
+                failures.append(ProviderError(
+                    provider["tier"], provider["model"],
+                    f"returned {shape_error} where a JSON {expect} was expected",
+                    f"first 200 chars: {candidate[:200]!r}"))
+                print(f"⚠️  {failures[-1]}")
+                continue
         _announce(used)
         return parsed, used
     raise AllProvidersFailed(failures)
@@ -425,4 +460,23 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
             print(f"  FAIL  {_name}: {type(_exc).__name__}: {_exc}")
             _failures += 1
     print(f"{len(_VALUE_CASES)} JSON-value shapes checked")
+
+    # Shape coercion: a wrong-shaped response must be reported so the caller can
+    # fail over, not handed to a consumer that will raise AttributeError on it.
+    _SHAPE_CASES = [
+        ("object stays an object", {"a": 1}, "object", dict, False),
+        ("one-element array unwraps", [{"a": 1}], "object", dict, False),
+        ("multi-element array rejected", [{"a": 1}, {"b": 2}], "object", list, True),
+        ("string rejected as object", "hi", "object", str, True),
+        ("array stays an array", [1, 2], "array", list, False),
+        ("object rejected as array", {"a": 1}, "array", dict, True),
+    ]
+    for _name, _value, _expect, _type, _should_error in _SHAPE_CASES:
+        _out, _err = _coerce_shape(_value, _expect)
+        if bool(_err) == _should_error and isinstance(_out, _type):
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: error={_err!r} value={_out!r}")
+            _failures += 1
+    print(f"{len(_SHAPE_CASES)} shape contracts checked")
     raise SystemExit(1 if _failures else 0)
