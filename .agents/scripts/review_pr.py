@@ -36,34 +36,13 @@ assert not NOTICE_MARKER.startswith(REVIEW_MARKER), (
     "NOTICE_MARKER must not share REVIEW_MARKER's prefix — see BEA-428."
 )
 
+from _shared import strip_code_fence
+
 client = Client(
     host="https://ollama.com",
     headers={"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"},
 )
 
-
-
-def _strip_code_fence(content):
-    """Return `content` with a surrounding Markdown code fence removed, if present.
-
-    Models differ on whether they honour a JSON response format literally or
-    wrap the object in a ```json fence. qwen3-coder-next returned bare JSON, so
-    this script fed the raw string straight to json.loads(); glm-5.2 fences its
-    output, which surfaced as `Expecting value: line 1 column 1` the moment the
-    model was swapped (BEA-428). Strip the fence rather than depend on any
-    particular model's formatting habits.
-
-    Only a fence that opens the content is removed, so a JSON string that merely
-    contains a fenced block in one of its values is left intact.
-    """
-    text = (content or "").strip()
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    lines = lines[1:]  # drop the opening ``` (with or without a language tag)
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
 
 
 def get_review_cycle_count():
@@ -261,7 +240,7 @@ DIFF:
             ) from e
         raise RuntimeError(f"Ollama API call failed: {msg}") from e
 
-    content = _strip_code_fence(response.message.content)
+    content = strip_code_fence(response.message.content)
     try:
         result = json.loads(content)
     except json.JSONDecodeError as e:

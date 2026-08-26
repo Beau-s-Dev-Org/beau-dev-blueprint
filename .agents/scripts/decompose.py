@@ -1,3 +1,4 @@
+from _shared import strip_code_fence
 import os
 import json
 import sys
@@ -70,7 +71,7 @@ def main():
     # 3. Clean up the response (Remove Markdown backticks if present)
     content = response.message.content
     print(f"DEBUG: AI Response: {content}") 
-    content = content.replace("```json", "").replace("```", "").strip()
+    content = strip_code_fence(content)
 
     # 4. Parse and Create Issues
     tasks_data = json.loads(content)
