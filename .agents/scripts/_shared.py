@@ -449,36 +449,50 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
             print(f"⚠️  {exc}")
             continue
         # Every rejection records BOTH its reason and its detail together, so
-        # the two always describe the same candidate. Holding them in separate
-        # variables that persisted across the loop let a reason from one
-        # candidate be reported beside a detail from another.
+        # the two always describe the same candidate.
+        #
+        # The FIRST failure is kept, not the last. Candidates are yielded
+        # outermost-first, so candidate 1 is the whole response and the rest are
+        # fragments nested inside it. When the envelope itself fails to parse,
+        # the loop walks into its own nested objects — each of which parses
+        # fine and is then rejected for not being an envelope — and reporting
+        # the last of those said "returned a JSON object that is not the
+        # expected envelope" while the real cause was a parse error in the
+        # response as a whole. Observed live on this PR.
         parsed = None
-        last_reason = None
-        last_detail = None
+        fail_reason = None
+        fail_detail = None
+        tried = 0
         for candidate in iter_json_candidates(raw):
+            tried += 1
             excerpt = f"candidate: {candidate[:200]!r}"
             try:
                 value = json.loads(candidate, strict=False)
             except json.JSONDecodeError as exc:
-                last_reason, last_detail = "returned unparseable JSON", f"{exc} | {excerpt}"
+                if fail_reason is None:
+                    fail_reason = "returned unparseable JSON"
+                    fail_detail = f"{exc} | {excerpt}"
                 continue
             if expect:
                 value, shape_error = _coerce_shape(value, expect, require_keys)
                 if shape_error:
-                    last_reason, last_detail = f"returned {shape_error}", excerpt
+                    if fail_reason is None:
+                        fail_reason, fail_detail = f"returned {shape_error}", excerpt
                     continue
             if validate:
                 content_error = validate(value)
                 if content_error:
-                    last_reason, last_detail = f"returned {content_error}", excerpt
+                    if fail_reason is None:
+                        fail_reason, fail_detail = f"returned {content_error}", excerpt
                     continue
             parsed = value
             break
         if parsed is None:
+            detail = fail_detail or "no JSON value found in the response"
             failures.append(ProviderError(
                 provider["tier"], provider["model"],
-                last_reason or "returned no usable JSON",
-                last_detail or "no JSON value found in the response"))
+                fail_reason or "returned no usable JSON",
+                f"{detail} ({tried} candidate(s) tried)"))
             print(f"⚠️  {failures[-1]}")
             continue
         _announce(used)
