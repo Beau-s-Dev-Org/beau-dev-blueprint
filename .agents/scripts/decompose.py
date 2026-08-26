@@ -69,9 +69,8 @@ def main():
         ) from e
     model_name = provider["model"]
 
-    # 3. Clean up the response (Remove Markdown backticks if present)
 
-    # 4. Parse and Create Issues
+    # 3. Create Issues (parsing and validation happen in call_json_llm)
     
     # Handle both a list directly or a 'tasks' wrapper
     if isinstance(tasks_data, dict):

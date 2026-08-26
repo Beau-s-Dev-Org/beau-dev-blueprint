@@ -190,9 +190,12 @@ def _classify(status, body):
 
 def _announce(provider):
     """Say which tier actually served the result — only once it is usable."""
+    shown = provider.get("served_model", provider["model"])
+    detail = shown if shown == provider["model"] else f"{provider['model']} -> {shown}"
     if provider["tier"] != "primary":
-        print(f"↩️  Primary unavailable; served by {provider['tier']} "
-              f"({provider['model']}).")
+        print(f"↩️  Primary unavailable; served by {provider['tier']} ({detail}).")
+    elif shown != provider["model"]:
+        print(f"🧭  Router selected {shown}.")
 
 
 def _call_one(providers, prompt, timeout, json_mode=True):
@@ -235,13 +238,21 @@ def _call_one(providers, prompt, timeout, json_mode=True):
             continue
 
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            body = response.json()
+            content = body["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             last = ProviderError(provider["tier"], provider["model"],
                                  "unreadable response shape", str(exc))
             continue
 
-        return content, provider
+        # A router reports which model it actually picked. Without this every
+        # log line and review footer reads "openrouter/auto", which says nothing
+        # about what reviewed the code — the same misreporting as a label that
+        # claims escalation that did not happen. Falls back to the requested
+        # name when a provider omits the field.
+        served = dict(provider)
+        served["served_model"] = body.get("model") or provider["model"]
+        return content, served
 
     raise last
 

@@ -285,7 +285,11 @@ DIFF:
         # never present as a passing check.
         raise RuntimeError(f"❌ NO REVIEW RAN: {e}") from e
 
-    model_name = provider["model"]
+    # Display the model that actually served the review. The escalation check
+    # below deliberately compares the REQUESTED model instead: the override is a
+    # request, and a router resolving it to a concrete model does not change
+    # whether escalation was asked for.
+    model_name = provider.get("served_model", provider["model"])
 
     summary = result.get("summary", "_No summary provided by the reviewer._")
     issues = result.get("issues") or []
@@ -302,7 +306,7 @@ DIFF:
     # The override is applied to the PRIMARY tier only, so a fallback serving
     # the same model string is not an escalation. Without the tier check, a
     # fallback whose model happens to equal ESCALATE_MODEL claimed one.
-    escalated = (bool(model_override) and model_name == model_override
+    escalated = (bool(model_override) and provider["model"] == model_override
                  and provider["tier"] == "primary")
     model_note = (
         f"🔬 _Model escalated to **{model_name}** (review cycle {cycle_count + 1})._"
