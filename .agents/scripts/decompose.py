@@ -1,17 +1,13 @@
 import os
-import json
-import sys
 import shutil
 import subprocess
-import yaml
+import sys
 from datetime import datetime
-from ollama import Client
 
-# 1. Setup the Cloud Connection
-client = Client(
-    host='https://ollama.com',
-    headers={'Authorization': f"Bearer {os.environ.get('OLLAMA_CLOUD_API_KEY')}"}
-)
+import yaml
+
+from _shared import AllProvidersFailed, call_json_llm, decomposition_tasks
+
 
 def create_issue(task):
     """Uses GitHub CLI to create the issue with labels."""
@@ -43,21 +39,38 @@ def main():
         proposal_content = f.read()
 
     # 2. Call the AI
-    model_name = os.getenv("DECOMP_MODEL", "qwen3-coder-next")
-    
-    response = client.chat(
-        model=model_name,
-        messages=[{'role': 'user', 'content': f"Decompose this proposal into a JSON list of tasks. Use 'task' for the title and 'description' for the details: {proposal_content}"}],
-        format='json'
+    # No model is named here. The primary provider is a router and every model
+    # name lives in workflow config, so a retirement is a settings change, not a
+    # code change (BEA-428). Ordered fallbacks cover the failures a router does
+    # not solve — chiefly an exhausted credit balance, which is a 402.
+    prompt = (
+        "Decompose this proposal into a JSON list of tasks. Use 'task' for the "
+        f"title and 'description' for the details: {proposal_content}"
     )
+    try:
+        tasks_data, provider = call_json_llm(
+            "DECOMP", prompt,
+            # Accepts a bare array, a {"tasks": [...]} wrapper, or a single
+            # task object — and checks the tasks themselves, since create_issue
+            # subscripts task['task'] for the title. Without this an envelope
+            # like {"tasks": null} or {"error": "..."} reaches the consumer and
+            # dies there instead of failing over to the next provider.
+            validate=decomposition_tasks,
+        )
+    except AllProvidersFailed as e:
+        # Fail loudly and specifically. A decomposition that silently produced
+        # no tasks would look identical to a proposal with nothing to do.
+        raise RuntimeError(
+            f"❌ NO DECOMPOSITION RAN: every configured LLM provider failed. "
+            f"{e}\n\nMost causes are account or configuration problems rather "
+            f"than code — an exhausted credit balance, a rotated key, or a "
+            f"retired model. Fix the affected tier's LLM_URL* / LLM_API_KEY* / "
+            f"DECOMP_MODEL* settings."
+        ) from e
+    model_name = provider["model"]
 
-    # 3. Clean up the response (Remove Markdown backticks if present)
-    content = response.message.content
-    print(f"DEBUG: AI Response: {content}") 
-    content = content.replace("```json", "").replace("```", "").strip()
 
-    # 4. Parse and Create Issues
-    tasks_data = json.loads(content)
+    # 3. Create Issues (parsing and validation happen in call_json_llm)
     
     # Handle both a list directly or a 'tasks' wrapper
     if isinstance(tasks_data, dict):
@@ -65,6 +78,11 @@ def main():
     else:
         tasks = tasks_data
 
+    if not tasks:
+        # Valid but empty: the model found nothing to do. Say so rather than
+        # archiving the proposal silently, which is indistinguishable from a
+        # successful decomposition that created issues.
+        print("⚠️  The model returned no tasks for this proposal — nothing to create.")
     for task in tasks:
         create_issue(task)
 

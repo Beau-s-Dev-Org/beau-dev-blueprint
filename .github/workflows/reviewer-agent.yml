@@ -23,21 +23,61 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install ollama requests
+        run: pip install requests
+
+      - name: Verify shared parsing self-check
+        # A self-check nothing runs is the same false assurance this pipeline
+        # exists to remove. It caught nothing when extract_json_value was
+        # renamed out from under it and the block sat broken for three commits.
+        # Two seconds here, and a broken parser contract fails before any model
+        # is called.
+        run: python .agents/scripts/_shared.py
 
       - name: Run PR Reviewer Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          REVIEW_MODEL: "qwen3-coder-next"
-          # After ESCALATE_AFTER_CYCLES completed review cycles on the same PR,
-          # switch to this stronger model for deeper analysis.
-          ESCALATE_MODEL: "qwen3-235b-a22b"
-          ESCALATE_AFTER_CYCLES: "2"
-          # Hard cap: halt the loop entirely after this many completed cycles to
-          # prevent runaway token usage.
-          MAX_REVIEW_CYCLES: "3"
+          # ── LLM provider chain ──────────────────────────────────────
+          # No model is pinned as the primary. openrouter/auto is a ROUTER: it
+          # picks a live model per request, so it has no version that can be
+          # retired out from under this workflow (BEA-428, where a pinned
+          # qwen3 model 410'd every review for a month).
+          #
+          # A router still fails — most often on an exhausted credit balance,
+          # which returns 402, not 410. Fallback 1 is a separate account and
+          # endpoint so a funding or key problem at one provider does not stop
+          # reviews. Tiers are tried in order; a tier with any of URL / key /
+          # model missing is skipped and announced in the log.
+          #
+          # These are settings, not code. Changing a model or endpoint here
+          # needs no source edit.
+          LLM_URL: "https://openrouter.ai/api/v1"
+          LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          REVIEW_MODEL: "openrouter/auto"
+          LLM_URL_FALLBACK1: "https://ollama.com/v1"
+          LLM_API_KEY_FALLBACK1: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+          REVIEW_MODEL_FALLBACK1: "glm-5.2:cloud"
+          # Attempts per tier, for response-quality failures only. A model that
+          # mis-escapes a character deep in a long prose field produces
+          # unparseable JSON and loses the whole review; the same prompt
+          # usually parses on a second call. Deterministic failures (credits,
+          # auth, retired model) are never retried.
+          LLM_ATTEMPTS_PER_TIER: "2"
+          # Escalation is OFF by default and deliberately so: naming a specific
+          # stronger model reintroduces exactly the retirement risk the router
+          # removes. Set it to pin one, accepting that it must be re-verified
+          # whenever that model is deprecated. Empty = the router keeps routing.
+          ESCALATE_MODEL: ""
+          ESCALATE_AFTER_CYCLES: "5"
+          # Hard cap: halt the loop entirely after this many completed cycles.
+          # Was 3, which truncated legitimate review — real PRs in the consuming
+          # repos have needed 24, 23, 13 and 9 rounds. The cap is for a PR that
+          # is genuinely not converging, not a review budget.
+          MAX_REVIEW_CYCLES: "25"
+          # Past this many cycles the reviewer is instructed to enumerate the
+          # full state space rather than issue another narrow fix to a region
+          # earlier rounds already touched.
+          REPETITION_WARNING_AFTER_CYCLES: "2"
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: python .agents/scripts/review_pr.py

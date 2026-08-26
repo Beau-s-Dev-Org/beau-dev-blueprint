@@ -1,33 +1,68 @@
-import json
 import os
 import subprocess
+
 import requests
-from ollama import Client
+
+from _shared import AllProvidersFailed, call_json_llm, review_issues
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-OLLAMA_CLOUD_API_KEY = os.environ["OLLAMA_CLOUD_API_KEY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
 REPO = os.environ["REPO"]
 
-# qwen3-coder-next has a large context window; 8000 chars keeps the prompt well
-# within limits while covering the most meaningful parts of most PR diffs.
-MAX_DIFF_CHARS = 8000
+# How much of the diff to send. Was 8000, which truncated real PRs badly enough
+# that the model reported the cut point as a syntax error in the source (see the
+# truncation notice below, added for the same reason). 60000 covers most PRs
+# whole while staying well inside a modern context window; override per repo if
+# a diff routinely exceeds it.
+MAX_DIFF_CHARS = int(os.getenv("MAX_DIFF_CHARS", "60000"))
 
 # ── Loop-safety controls ────────────────────────────────────────────────────
 # How many completed automated review cycles to allow before escalating to the
 # stronger model. When cycle_count reaches this value the escalation kicks in
 # (e.g. 2 = escalate when cycle_count reaches 2, i.e. on the 3rd cycle).
-ESCALATE_AFTER_CYCLES = int(os.getenv("ESCALATE_AFTER_CYCLES", "2"))
-# Hard cap: after this many completed cycles the loop is stopped entirely to
-# prevent runaway token consumption.
-MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "3"))
-# Sentinel string used to identify automated review comments when counting cycles.
+ESCALATE_AFTER_CYCLES = int(os.getenv("ESCALATE_AFTER_CYCLES", "5"))
+# Hard cap: after this many completed cycles the loop stops entirely, to bound
+# token consumption on a PR that is genuinely not converging.
+#
+# This was 3, which was far below observed reality and truncated legitimate
+# review. Real round counts on substantial PRs in the consuming repos:
+# 24 rounds (marketing-as-code PR #224 / BEA-250), 23 (BEA-374), 13 (BEA-413),
+# 9 (BEA-304). A cap of 3 stopped at roughly an eighth of the observed maximum
+# and read, from the outside, exactly like a completed review — the breaker
+# posts a notice and the check goes green.
+#
+# 25 covers the worst case seen so far with a little headroom. The cap exists
+# for a genuinely non-converging PR, not as a review budget.
+MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "25"))
+# After this many cycles, a PR is being re-reviewed enough that repetition is
+# the real risk rather than volume. Nine of PR #224's 24 rounds re-patched the
+# same ~30 lines, and a defect introduced by one of those narrow patches
+# survived an extra full round. Past this threshold the reviewer is told to
+# enumerate the state space instead of issuing another one-line fix.
+REPETITION_WARNING_AFTER_CYCLES = int(os.getenv("REPETITION_WARNING_AFTER_CYCLES", "2"))
+# Sentinel string used to identify COMPLETED automated review comments when
+# counting cycles. Only a comment representing a real, model-backed review may
+# carry this prefix.
 REVIEW_MARKER = "## 🤖 Automated PR Review"
+# Sentinel for diagnostic notices that are NOT completed reviews (e.g. the
+# reviewer being unavailable). This must NOT start with REVIEW_MARKER: cycle
+# counting uses str.startswith, so a shared prefix would make a failed API call
+# count as a completed review — three of those would trip the circuit breaker
+# and turn "no review ran" into a green check with no review behind it, which
+# is the exact defect BEA-428 exists to remove.
+NOTICE_MARKER = "## ⚠️ Automated Review Notice"
+if NOTICE_MARKER.startswith(REVIEW_MARKER):
+    # Not an assert: asserts are stripped under `python -O`, which would remove
+    # the guard on a P1 invariant without a word — the same silent-degradation
+    # shape this module exists to prevent.
+    raise RuntimeError(
+        "NOTICE_MARKER must not share REVIEW_MARKER's prefix: cycle counting "
+        "uses str.startswith, so a shared prefix makes a failed review count as "
+        "a completed one and eventually trips the circuit breaker into passing "
+        "with no review behind it (BEA-428)."
+    )
 
-client = Client(
-    host="https://ollama.com",
-    headers={"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"},
-)
+
 
 
 def get_review_cycle_count():
@@ -36,6 +71,11 @@ def get_review_cycle_count():
     Scans all PR comments for the REVIEW_MARKER sentinel to determine how many
     times the automated reviewer has already posted, which is used to enforce
     the escalation threshold and the hard cap.
+
+    Only comments representing a real, model-backed review are counted.
+    Diagnostic notices carry NOTICE_MARKER instead, so an unavailable reviewer
+    keeps failing red rather than accumulating toward the cap and eventually
+    passing with no review behind it.
     """
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
     headers = {
@@ -150,19 +190,50 @@ def main():
         return
 
     truncated_diff = diff[:MAX_DIFF_CHARS]
+    # If the diff is cut, SAY SO. A model handed a diff that stops mid-token
+    # reports the cut as a syntax error in the source — observed live on this
+    # PR, where a truncated `_classify` was reported as an unterminated string
+    # literal in a file that parses cleanly. An unflagged truncation turns a
+    # review into confident fiction.
+    truncation_notice = ""
+    if len(diff) > MAX_DIFF_CHARS:
+        truncation_notice = (
+            f"\nNOTE: this diff was truncated at {MAX_DIFF_CHARS} of {len(diff)} "
+            f"characters. It may stop mid-line or mid-token. Do NOT report the "
+            f"truncation point as a syntax error, an unterminated string, or an "
+            f"incomplete function — that is an artifact of this excerpt, not the "
+            f"source. Review only what is fully shown.\n"
+        )
+        print(f"✂️  Diff truncated: {len(diff)} -> {MAX_DIFF_CHARS} chars (model told).")
 
     # ── Model selection with escalation ─────────────────────────────────────
-    default_model = os.getenv("REVIEW_MODEL", "qwen3-coder-next")
-    escalate_model = os.getenv("ESCALATE_MODEL", default_model)
-    if cycle_count >= ESCALATE_AFTER_CYCLES:
-        model_name = escalate_model
-        print(
-            f"⬆️  Escalating to stronger model '{model_name}' "
-            f"after {cycle_count} completed cycle(s)."
-        )
+    # No model is named here. The primary provider is a router (openrouter/auto
+    # by default) and every name lives in workflow config, so a retirement is a
+    # settings change rather than a code change (BEA-428). ESCALATE_MODEL, when
+    # set, overrides the PRIMARY tier only — an escalation target is not
+    # necessarily available at a fallback endpoint.
+    escalate_model = os.getenv("ESCALATE_MODEL", "").strip()
+    model_override = None
+    if cycle_count >= ESCALATE_AFTER_CYCLES and escalate_model:
+        model_override = escalate_model
+        print(f"⬆️  Escalating to '{escalate_model}' after {cycle_count} completed cycle(s).")
     else:
-        model_name = default_model
-        print(f"🤖 Using model '{model_name}' (cycle {cycle_count + 1}).")
+        print(f"🤖 Reviewing (cycle {cycle_count + 1}).")
+
+    # Repeated-patch discipline. When a PR has already been round-tripped
+    # several times, the failure mode stops being "missed a bug" and becomes
+    # "keeps re-patching one region one line at a time". Telling the reviewer
+    # this explicitly is the cheapest place to apply the rule.
+    repetition_guidance = ""
+    if cycle_count >= REPETITION_WARNING_AFTER_CYCLES:
+        repetition_guidance = (
+            f"\nIMPORTANT — this PR has already been through {cycle_count} automated "
+            f"review cycle(s). If you are about to flag a function or region that "
+            f"earlier rounds already changed, do NOT propose another narrow fix. "
+            f"Enumerate every state and input shape that code must handle, say which "
+            f"ones are unhandled, and propose one change covering all of them. A "
+            f"sequence of one-line fixes to the same region is itself the defect.\n"
+        )
 
     prompt = f"""You are an expert code reviewer. Review the following pull request diff.
 
@@ -175,34 +246,71 @@ Return a JSON object with exactly two keys:
   - "area": One of "bug", "security", "performance", "code-quality", or "testing".
 
 If no actionable issues are found, return an empty "issues" array.
-
+{repetition_guidance}{truncation_notice}
 DIFF:
 {truncated_diff}
 """
 
     try:
-        response = client.chat(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            format="json",
+        result, provider = call_json_llm("REVIEW", prompt, model_override=model_override,
+                                          expect="object", require_keys=("summary", "issues"),
+                                          validate=review_issues)
+    except AllProvidersFailed as e:
+        # Every configured provider failed. This must be unmistakable on the PR
+        # itself, not just a traceback in the Actions log — a dead reviewer went
+        # unnoticed for a month precisely because the only signal was buried
+        # (BEA-428). The notice carries NOTICE_MARKER, so it is NOT counted as a
+        # completed review cycle and cannot push this PR toward the circuit
+        # breaker.
+        rows = "\n".join(
+            f"| `{f.tier}` | `{f.model}` | {f.reason} |" for f in e.failures
         )
-    except Exception as e:
-        raise RuntimeError(f"Ollama API call failed: {e}") from e
+        try:
+            post_comment(
+                f"{NOTICE_MARKER} — ❌ REVIEWER UNAVAILABLE\n\n"
+                f"Every configured LLM provider failed, so **no automated review "
+                f"ran on this PR** — do not treat a merge over this as reviewed.\n\n"
+                f"| Tier | Model | Failure |\n| --- | --- | --- |\n{rows}\n\n"
+                f"Most failures here are account or configuration problems rather "
+                f"than code: an exhausted credit balance (`payment required`), a "
+                f"rotated key (`authentication rejected`), or a retired model "
+                f"(`model retired`). Fix the affected tier's `LLM_URL*` / "
+                f"`LLM_API_KEY*` / `REVIEW_MODEL*` settings — no code change "
+                f"should be needed.\n\n"
+                f"```\n{e}\n```"
+            )
+        except Exception as comment_err:
+            print(f"⚠️  Also failed to post the failure comment: {comment_err}")
+        # Re-raise so the check stays red. A reviewer that could not run must
+        # never present as a passing check.
+        raise RuntimeError(f"❌ NO REVIEW RAN: {e}") from e
 
-    content = response.message.content.strip()
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Model returned invalid JSON: {e}\nRaw content: {content}") from e
+    # Display the model that actually served the review. The escalation check
+    # below deliberately compares the REQUESTED model instead: the override is a
+    # request, and a router resolving it to a concrete model does not change
+    # whether escalation was asked for.
+    model_name = provider.get("served_model", provider["model"])
 
     summary = result.get("summary", "_No summary provided by the reviewer._")
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
 
     # Post the human-readable review as a PR comment.
     issue_count = len(issues)
+    # Say "escalated" only when the escalation override is what actually served
+    # the review. Keying off cycle_count alone claimed escalation whenever the
+    # cycle threshold was passed — including with ESCALATE_MODEL unset (the
+    # default), and when a configured escalation model failed and a fallback
+    # tier answered instead. A note that misreports which model reviewed the
+    # code is the same defect class as a check that reports green without
+    # running.
+    # The override is applied to the PRIMARY tier only, so a fallback serving
+    # the same model string is not an escalation. Without the tier check, a
+    # fallback whose model happens to equal ESCALATE_MODEL claimed one.
+    escalated = (bool(model_override) and provider["model"] == model_override
+                 and provider["tier"] == "primary")
     model_note = (
         f"🔬 _Model escalated to **{model_name}** (review cycle {cycle_count + 1})._"
-        if cycle_count >= ESCALATE_AFTER_CYCLES
+        if escalated
         else f"_Review cycle {cycle_count + 1} · model: {model_name}_"
     )
     if issue_count:

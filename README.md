@@ -99,10 +99,22 @@ The reviewer runs as a **GitHub Action** (`.github/workflows/reviewer-agent.yml`
 
 | Setting | Default | Description |
 |---|---|---|
-| `REVIEW_MODEL` | `qwen3-coder-next` | Model used for standard review cycles |
-| `ESCALATE_MODEL` | `qwen3-235b-a22b` | Stronger model used after `ESCALATE_AFTER_CYCLES` |
-| `ESCALATE_AFTER_CYCLES` | `2` | Switch to escalation model after this many cycles |
-| `MAX_REVIEW_CYCLES` | `3` | Hard cap — halts the loop and requests human review |
+| `LLM_URL` | `https://openrouter.ai/api/v1` | Primary provider endpoint (OpenAI-compatible) |
+| `LLM_API_KEY` | secret `OPENROUTER_API_KEY` | Primary provider key |
+| `REVIEW_MODEL` | `openrouter/auto` | Primary model. A **router** — it picks a live model per request, so it has no version that can be retired |
+| `LLM_URL_FALLBACK1` | `https://ollama.com/v1` | Fallback 1 endpoint |
+| `LLM_API_KEY_FALLBACK1` | secret `OLLAMA_CLOUD_API_KEY` | Fallback 1 key — a separate account, so a funding or key problem at one provider does not stop reviews |
+| `REVIEW_MODEL_FALLBACK1` | `glm-5.2:cloud` | Fallback 1 model |
+| `ESCALATE_MODEL` | *(empty)* | Optional stronger model for the primary tier. Empty by default: naming one reintroduces the retirement risk the router removes |
+| `ESCALATE_AFTER_CYCLES` | `5` | Switch to the escalation model after this many cycles |
+| `MAX_REVIEW_CYCLES` | `25` | Hard cap — halts the loop and requests human review. Sized from observed rounds on real PRs (24, 23, 13, 9), not a review budget |
+| `REPETITION_WARNING_AFTER_CYCLES` | `2` | Past this, the reviewer is told to enumerate the state space rather than issue another narrow fix to a region earlier rounds already touched |
+| `MAX_DIFF_CHARS` | `60000` | Diff characters sent to the model. A truncated diff is explicitly declared in the prompt so the cut is not reported as a syntax error |
+
+A provider tier is used only when its URL, key, and model are all set; a
+partially configured tier is skipped and announced in the job log. If every
+configured tier fails, the run raises and posts a table naming each tier and
+its failure reason — it never returns an empty review.
 
 ## Usage
 
