@@ -10,8 +10,11 @@ GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 PR_NUMBER = os.environ["PR_NUMBER"]
 REPO = os.environ["REPO"]
 
-# The review model has a large context window; 8000 chars keeps the prompt
-# well within limits while covering the most meaningful parts of most PR diffs.
+# How much of the diff to send. Was 8000, which truncated real PRs badly enough
+# that the model reported the cut point as a syntax error in the source (see the
+# truncation notice below, added for the same reason). 60000 covers most PRs
+# whole while staying well inside a modern context window; override per repo if
+# a diff routinely exceeds it.
 MAX_DIFF_CHARS = int(os.getenv("MAX_DIFF_CHARS", "60000"))
 
 # ── Loop-safety controls ────────────────────────────────────────────────────
