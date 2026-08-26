@@ -433,40 +433,68 @@ def decomposition_tasks(value):
     return None
 
 
-def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None,
-                  require_keys=None, validate=None):
-    """Call providers until one returns output that actually parses as JSON.
+def _select_payload(raw, expect, require_keys, validate):
+    """Pick the first candidate in `raw` that is actually usable.
 
-    A 200 response carrying unparseable content used to be treated as success,
-    so a provider emitting malformed JSON was never retried elsewhere and the
-    run died. Three distinct parse failures were observed in consecutive review
-    rounds on this very PR — a ```json fence, raw control characters inside
-    string values, and an unbalanced delimiter — which is the signal to stop
-    patching the parser and treat unparseable output as what it is: that
-    provider failing to answer.
-
-    `validate` makes CONTENT part of succeeding as well. Shape alone is not
-    enough: a response can be a perfectly good object with `issues` set to a
-    string, and the consumer then reports len("no issues found") == 15
-    actionable findings and iterates it character by character. A validator
-    returns an error string for anything it cannot use, and that tier fails
-    over like any other failure.
-
-    `expect` ("object" or "array") makes SHAPE part of succeeding too. A
-    response of the wrong shape is exactly as unusable to the caller as one
-    that will not parse, and letting it through only moves the failure into the
-    consumer — where `result.get(...)` on a list raises AttributeError and
-    bypasses the clean failure notice this module exists to guarantee. Models
-    commonly wrap a single object in a one-element array; that specific case is
-    unwrapped rather than rejected, since the intent is unambiguous.
-
-    So parseability is part of a provider succeeding. Everything the parser can
-    reasonably absorb is absorbed first — a surrounding code fence, prose
-    around the object, and control characters inside strings (strict=False) —
-    and anything still unparseable advances to the next tier. If no configured
-    provider returns usable JSON, this raises AllProvidersFailed rather than
-    returning a partial or empty result.
+    Returns (value, reason, detail, tried). `value` is None when nothing
+    qualified, in which case reason/detail describe the FIRST rejection — the
+    outermost candidate — since later ones are fragments nested inside it.
     """
+    reason = detail = None
+    tried = 0
+    broken_until = -1
+    for begin, stop, candidate in iter_json_candidates(raw):
+        if begin < broken_until:
+            # Nested inside a candidate that failed to parse: a fragment of
+            # something broken, not an alternative payload. Accepting it
+            # silently discards whatever the rest of that structure held.
+            continue
+        tried += 1
+        excerpt = f"candidate: {candidate[:200]!r}"
+        try:
+            value = json.loads(candidate, strict=False)
+        except json.JSONDecodeError as exc:
+            broken_until = max(broken_until, stop)
+            if reason is None:
+                reason, detail = "returned unparseable JSON", f"{exc} | {excerpt}"
+            continue
+        if expect:
+            value, shape_error = _coerce_shape(value, expect, require_keys)
+            if shape_error:
+                if reason is None:
+                    reason, detail = f"returned {shape_error}", excerpt
+                continue
+        if validate:
+            content_error = validate(value)
+            if content_error:
+                if reason is None:
+                    reason, detail = f"returned {content_error}", excerpt
+                continue
+        return value, None, None, tried
+    return None, reason, detail, tried
+
+
+def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None,
+                  require_keys=None, validate=None, attempts=None):
+    """Call providers until one returns output that is actually usable.
+
+    Usability means three things, and a response failing any of them is that
+    tier failing to answer, not something to hand the consumer: it must PARSE,
+    it must have the expected SHAPE, and `validate` must accept its CONTENT.
+    Exhausting every provider raises AllProvidersFailed rather than returning a
+    partial or empty result — a caller must never be able to mistake "no
+    provider answered" for "the model had nothing to say".
+
+    Each tier gets `attempts` tries (LLM_ATTEMPTS_PER_TIER, default 2), but only
+    for response-quality failures. Those are stochastic: the same prompt that
+    produced an escaping error deep in a long prose field usually parses on a
+    second call — observed twice on this PR, where the whole review was lost to
+    a mis-escaped character at offset 1409. Transport and account failures are
+    deterministic — an exhausted balance, a rotated key, a retired model — and
+    retrying them only wastes time, so those move straight to the next tier.
+    """
+    if attempts is None:
+        attempts = max(1, int(os.getenv("LLM_ATTEMPTS_PER_TIER", "2")))
     providers = build_provider_chain(purpose, model_override)
     if not providers:
         raise AllProvidersFailed(
@@ -476,71 +504,33 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
 
     failures = []
     for provider in providers:
-        single = [provider]
-        try:
-            raw, used = _call_one(single, prompt, timeout)
-        except ProviderError as exc:
-            failures.append(exc)
-            print(f"⚠️  {exc}")
-            continue
-        # Every rejection records BOTH its reason and its detail together, so
-        # the two always describe the same candidate.
-        #
-        # The FIRST failure is kept, not the last. Candidates are yielded
-        # outermost-first, so candidate 1 is the whole response and the rest are
-        # fragments nested inside it. When the envelope itself fails to parse,
-        # the loop walks into its own nested objects — each of which parses
-        # fine and is then rejected for not being an envelope — and reporting
-        # the last of those said "returned a JSON object that is not the
-        # expected envelope" while the real cause was a parse error in the
-        # response as a whole. Observed live on this PR.
-        parsed = None
-        fail_reason = None
-        fail_detail = None
-        tried = 0
-        broken_until = -1
-        for start, stop, candidate in iter_json_candidates(raw):
-            if start < broken_until:
-                # Nested inside a candidate that failed to parse — a fragment of
-                # something broken. Accepting it silently discards whatever the
-                # rest of that structure held.
-                continue
-            tried += 1
-            excerpt = f"candidate: {candidate[:200]!r}"
+        quality_failure = None
+        for attempt in range(1, attempts + 1):
             try:
-                value = json.loads(candidate, strict=False)
-            except json.JSONDecodeError as exc:
-                broken_until = max(broken_until, stop)
-                if fail_reason is None:
-                    fail_reason = "returned unparseable JSON"
-                    fail_detail = f"{exc} | {excerpt}"
-                continue
-            if expect:
-                value, shape_error = _coerce_shape(value, expect, require_keys)
-                if shape_error:
-                    if fail_reason is None:
-                        fail_reason, fail_detail = f"returned {shape_error}", excerpt
-                    continue
-            if validate:
-                content_error = validate(value)
-                if content_error:
-                    if fail_reason is None:
-                        fail_reason, fail_detail = f"returned {content_error}", excerpt
-                    continue
-            parsed = value
-            break
-        if parsed is None:
-            detail = fail_detail or "no JSON value found in the response"
-            failures.append(ProviderError(
+                raw, used = _call_one([provider], prompt, timeout)
+            except ProviderError as exc:
+                # Deterministic: no retry, straight to the next tier.
+                failures.append(exc)
+                print(f"⚠️  {exc}")
+                quality_failure = None
+                break
+            parsed, reason, detail, tried = _select_payload(
+                raw, expect, require_keys, validate)
+            if parsed is not None:
+                _announce(used)
+                return parsed, used
+            quality_failure = ProviderError(
                 provider["tier"], provider["model"],
-                fail_reason or "returned no usable JSON",
-                f"{detail} ({tried} candidate(s) tried)"))
-            print(f"⚠️  {failures[-1]}")
-            continue
-        _announce(used)
-        return parsed, used
+                reason or "returned no usable JSON",
+                f"{detail or 'no JSON value found in the response'} "
+                f"({tried} candidate(s) tried, attempt {attempt}/{attempts})")
+            if attempt < attempts:
+                print(f"↻  {provider['tier']} attempt {attempt}/{attempts}: "
+                      f"{reason or 'no usable JSON'} — retrying")
+        if quality_failure:
+            failures.append(quality_failure)
+            print(f"⚠️  {quality_failure}")
     raise AllProvidersFailed(failures)
-
 
 if __name__ == "__main__":  # pragma: no cover - runnable self-check
     # This repo has no test harness, so the shapes this function must handle

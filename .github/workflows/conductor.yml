@@ -52,6 +52,9 @@ jobs:
           LLM_URL_FALLBACK1: "https://ollama.com/v1"
           LLM_API_KEY_FALLBACK1: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
           DECOMP_MODEL_FALLBACK1: "glm-5.2:cloud"
+          # See reviewer-agent.yml — retries cover stochastic response-quality
+          # failures only, never deterministic account or model failures.
+          LLM_ATTEMPTS_PER_TIER: "2"
           # The proposal filename reaches the script as an argument via env,
           # never interpolated into the shell body: a ${{ }} value is
           # substituted textually before bash parses the line, so a filename

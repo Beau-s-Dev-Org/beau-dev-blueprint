@@ -57,6 +57,12 @@ jobs:
           LLM_URL_FALLBACK1: "https://ollama.com/v1"
           LLM_API_KEY_FALLBACK1: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
           REVIEW_MODEL_FALLBACK1: "glm-5.2:cloud"
+          # Attempts per tier, for response-quality failures only. A model that
+          # mis-escapes a character deep in a long prose field produces
+          # unparseable JSON and loses the whole review; the same prompt
+          # usually parses on a second call. Deterministic failures (credits,
+          # auth, retired model) are never retried.
+          LLM_ATTEMPTS_PER_TIER: "2"
           # Escalation is OFF by default and deliberately so: naming a specific
           # stronger model reintroduces exactly the retirement risk the router
           # removes. Set it to pin one, accepting that it must be re-verified
