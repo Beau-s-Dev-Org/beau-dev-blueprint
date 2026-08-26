@@ -272,18 +272,30 @@ def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
     raise AllProvidersFailed(failures)
 
 
-def extract_json_object(text):
-    """Return the outermost balanced {...} in `text`, or the text itself.
+def extract_json_value(text):
+    """Return the outermost balanced JSON object or array in `text`.
 
-    Models wrap the object in prose ("Here is the review:"), append a closing
+    Models wrap the payload in prose ("Here is the review:"), append a closing
     remark, or both, even when asked for JSON only. Slicing to the outermost
-    balanced braces recovers the object in those cases. Quote- and
-    escape-aware, so a brace inside a string value does not end the scan.
+    balanced delimiters recovers the value in those cases.
+
+    BOTH `{...}` and `[...]` are handled, and whichever opens first wins. An
+    earlier version looked only for a brace, which did not merely fail on a
+    bare array — it found the first object INSIDE the array and returned that,
+    so a decomposition of five tasks parsed cleanly as one and the other four
+    vanished with no error. decompose.py asks for "a JSON list of tasks", so an
+    array is its expected shape, not an edge case.
+
+    Quote- and escape-aware, so a delimiter inside a string value does not end
+    the scan.
     """
     stripped = strip_code_fence(text)
-    start = stripped.find("{")
-    if start == -1:
+    starts = [i for i in (stripped.find("{"), stripped.find("[")) if i != -1]
+    if not starts:
         return stripped
+    start = min(starts)
+    opener = stripped[start]
+    closer = "}" if opener == "{" else "]"
     depth = 0
     in_string = False
     escaped = False
@@ -298,9 +310,9 @@ def extract_json_object(text):
             continue
         if ch == '"':
             in_string = True
-        elif ch == "{":
+        elif ch == opener:
             depth += 1
-        elif ch == "}":
+        elif ch == closer:
             depth -= 1
             if depth == 0:
                 return stripped[start:i + 1]
@@ -341,7 +353,7 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180):
             failures.append(exc)
             print(f"⚠️  {exc}")
             continue
-        candidate = extract_json_object(raw)
+        candidate = extract_json_value(raw)
         try:
             parsed = json.loads(candidate, strict=False)
         except json.JSONDecodeError as exc:
@@ -386,5 +398,31 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
         except Exception as _exc:  # noqa: BLE001 - self-check reports any failure
             print(f"  FAIL  {_name}: {type(_exc).__name__}: {_exc}")
             _failures += 1
-    print(f"{len(_CASES) - _failures}/{len(_CASES)} shapes parse")
+    print(f"{len(_CASES) - _failures}/{len(_CASES)} fence shapes parse")
+
+    # extract_json_value must recover BOTH objects and arrays. An array is
+    # decompose.py's expected shape ("a JSON list of tasks"), and an earlier
+    # brace-only implementation silently returned the first object inside an
+    # array — five tasks parsed cleanly as one.
+    _VALUE_CASES = {
+        "bare array": ('[{"task":"a"},{"task":"b"},{"task":"c"}]', 3),
+        "fenced array": ('```json\n[{"task":"a"},{"task":"b"}]\n```', 2),
+        "array wrapped in prose": ('Here:\n[{"task":"a"},{"task":"b"}]\nDone.', 2),
+        "array with a bracket in a string": ('[{"task":"use [this]"},{"task":"b"}]', 2),
+        "object": ('{"summary":"ok","issues":[]}', None),
+        "object containing an array": ('{"issues":[{"a":1},{"b":2}]}', None),
+    }
+    for _name, (_raw, _expected) in _VALUE_CASES.items():
+        try:
+            _parsed = json.loads(extract_json_value(_raw), strict=False)
+            _got = len(_parsed) if isinstance(_parsed, list) else None
+            if _got == _expected:
+                print(f"  ok    {_name}")
+            else:
+                print(f"  FAIL  {_name}: expected {_expected} items, got {_got}")
+                _failures += 1
+        except Exception as _exc:  # noqa: BLE001 - self-check reports any failure
+            print(f"  FAIL  {_name}: {type(_exc).__name__}: {_exc}")
+            _failures += 1
+    print(f"{len(_VALUE_CASES)} JSON-value shapes checked")
     raise SystemExit(1 if _failures else 0)
