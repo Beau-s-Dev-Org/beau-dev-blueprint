@@ -285,6 +285,15 @@ def iter_json_candidates(text, limit=20):
     So every balanced region is offered as a candidate and the caller takes the
     first that both parses and satisfies the expected shape. `limit` bounds the
     scan on pathological input.
+
+    Yields (start, end, text). The span matters: a candidate NESTED inside one
+    that failed to parse is a fragment of something broken, not an alternative
+    payload. `[{"task":"a"},{"task":"b"},]` has a trailing comma, so the array
+    fails — and its first element parses perfectly on its own. Accepting that
+    fragment creates one issue and drops the rest. A payload that merely FOLLOWS
+    a failed candidate (`[JSON]: {...}`) is disjoint and legitimate, so the
+    caller distinguishes them by span rather than by giving up after the first
+    failure.
     """
     stripped = strip_code_fence(text)
     yielded = 0
@@ -294,7 +303,7 @@ def iter_json_candidates(text, limit=20):
         end = _scan_balanced(stripped, i)
         if end is None:
             continue
-        yield stripped[i:end]
+        yield i, end, stripped[i:end]
         yielded += 1
         if yielded >= limit:
             return
@@ -361,6 +370,26 @@ def list_of_objects(value, key=None):
     return None
 
 
+def review_issues(value):
+    """Validate a review envelope's `issues`, including CLI-bound field types.
+
+    create_review_issue passes `title` to `gh issue create --title`, which needs
+    a string. `{"title": null}` survives a container check — the entry is a dict
+    — and then makes subprocess.run raise TypeError. That happens AFTER the
+    review comment has been posted, so the cycle counts as a completed review
+    whose findings were never logged: the worst of both outcomes.
+    """
+    container = list_of_objects(value, "issues")
+    if container:
+        return container
+    for index, issue in enumerate(value.get("issues") or []):
+        for field in ("title", "description", "severity", "area"):
+            if field in issue and not isinstance(issue[field], str):
+                return (f"issue {index} has a non-string '{field}' "
+                        f"(a JSON {type(issue[field]).__name__})")
+    return None
+
+
 def decomposition_tasks(value):
     """Validate a decomposition payload, including the tasks themselves.
 
@@ -393,8 +422,14 @@ def decomposition_tasks(value):
         if not isinstance(item, dict):
             return (f"task {index} is a JSON {type(item).__name__}, "
                     "expected an object")
-        if not item.get("task"):
-            return f"task {index} has no usable 'task' field"
+        title = item.get("task")
+        if not isinstance(title, str) or not title.strip():
+            # create_issue passes this straight to `gh issue create --title`,
+            # which needs a string. A list or number is truthy but makes
+            # subprocess.run raise TypeError AFTER the provider was declared
+            # successful, so no fallback is ever tried.
+            kind = "missing" if title is None else f"a JSON {type(title).__name__}"
+            return f"task {index} has no usable 'task' field ({kind})"
     return None
 
 
@@ -463,12 +498,19 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
         fail_reason = None
         fail_detail = None
         tried = 0
-        for candidate in iter_json_candidates(raw):
+        broken_until = -1
+        for start, stop, candidate in iter_json_candidates(raw):
+            if start < broken_until:
+                # Nested inside a candidate that failed to parse — a fragment of
+                # something broken. Accepting it silently discards whatever the
+                # rest of that structure held.
+                continue
             tried += 1
             excerpt = f"candidate: {candidate[:200]!r}"
             try:
                 value = json.loads(candidate, strict=False)
             except json.JSONDecodeError as exc:
+                broken_until = max(broken_until, stop)
                 if fail_reason is None:
                     fail_reason = "returned unparseable JSON"
                     fail_detail = f"{exc} | {excerpt}"
@@ -547,7 +589,7 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
     }
     def _first_json(text):
         """First candidate that parses — what call_json_llm does without shape rules."""
-        for _c in iter_json_candidates(text):
+        for _s, _e, _c in iter_json_candidates(text):
             try:
                 return json.loads(_c, strict=False)
             except json.JSONDecodeError:
@@ -617,7 +659,7 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
     ]
     for _raw, _key in _CANDIDATE_CASES:
         _found = None
-        for _cand in iter_json_candidates(_raw):
+        for _cs, _ce, _cand in iter_json_candidates(_raw):
             try:
                 _v = json.loads(_cand, strict=False)
             except json.JSONDecodeError:
@@ -680,4 +722,51 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
             print(f"  FAIL  {_name}: error={_err!r}")
             _failures += 1
     print(f"{len(_DECOMP_CASES)} decomposition contracts checked")
+
+    # CLI-bound field types. create_issue / create_review_issue pass these
+    # straight to `gh ... --title`, which needs a string; a non-string raises
+    # TypeError after the provider was already declared successful.
+    _CLI_CASES = [
+        ("review title null", {"issues": [{"title": None}]}, review_issues, True),
+        ("review title int", {"issues": [{"title": 7}]}, review_issues, True),
+        ("review title string", {"summary": "s", "issues": [{"title": "t"}]}, review_issues, False),
+        ("task is a list", {"tasks": [{"task": ["a"]}]}, decomposition_tasks, True),
+        ("task is a number", {"tasks": [{"task": 3}]}, decomposition_tasks, True),
+        ("task is blank", {"tasks": [{"task": "  "}]}, decomposition_tasks, True),
+        ("task is a string", {"tasks": [{"task": "a"}]}, decomposition_tasks, False),
+    ]
+    for _name, _value, _fn, _should_error in _CLI_CASES:
+        _err = _fn(_value)
+        if bool(_err) == _should_error:
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: error={_err!r}")
+            _failures += 1
+    print(f"{len(_CLI_CASES)} CLI-field contracts checked")
+
+    # Candidate spans: a fragment nested inside a candidate that failed to parse
+    # must not be accepted, or a malformed multi-task array yields one task and
+    # silently drops the rest. A payload that merely FOLLOWS a failed candidate
+    # is disjoint and must still be recovered.
+    _SPAN_CASES = [
+        ("fragment of a broken array", '[{"task":"a"},{"task":"b"},]', True),
+        ("disjoint payload after prose", 'Here [JSON]: {"task":"a"}', False),
+    ]
+    for _name, _raw, _expect_none in _SPAN_CASES:
+        _accepted = None
+        _broken_until = -1
+        for _s, _e, _c in iter_json_candidates(_raw):
+            if _s < _broken_until:
+                continue
+            try:
+                _accepted = json.loads(_c, strict=False)
+                break
+            except json.JSONDecodeError:
+                _broken_until = max(_broken_until, _e)
+        if (_accepted is None) == _expect_none:
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: accepted={_accepted!r}")
+            _failures += 1
+    print(f"{len(_SPAN_CASES)} candidate-span contracts checked")
     raise SystemExit(1 if _failures else 0)

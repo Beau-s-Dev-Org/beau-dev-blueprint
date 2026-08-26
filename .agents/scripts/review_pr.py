@@ -3,7 +3,7 @@ import subprocess
 
 import requests
 
-from _shared import AllProvidersFailed, call_json_llm, list_of_objects
+from _shared import AllProvidersFailed, call_json_llm, review_issues
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 PR_NUMBER = os.environ["PR_NUMBER"]
@@ -254,7 +254,7 @@ DIFF:
     try:
         result, provider = call_json_llm("REVIEW", prompt, model_override=model_override,
                                           expect="object", require_keys=("summary", "issues"),
-                                          validate=lambda v: list_of_objects(v, "issues"))
+                                          validate=review_issues)
     except AllProvidersFailed as e:
         # Every configured provider failed. This must be unmistakable on the PR
         # itself, not just a traceback in the Actions log — a dead reviewer went
@@ -299,7 +299,11 @@ DIFF:
     # tier answered instead. A note that misreports which model reviewed the
     # code is the same defect class as a check that reports green without
     # running.
-    escalated = bool(model_override) and model_name == model_override
+    # The override is applied to the PRIMARY tier only, so a fallback serving
+    # the same model string is not an escalation. Without the tier check, a
+    # fallback whose model happens to equal ESCALATE_MODEL claimed one.
+    escalated = (bool(model_override) and model_name == model_override
+                 and provider["tier"] == "primary")
     model_note = (
         f"🔬 _Model escalated to **{model_name}** (review cycle {cycle_count + 1})._"
         if escalated
