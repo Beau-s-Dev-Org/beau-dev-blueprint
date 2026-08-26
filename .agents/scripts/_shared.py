@@ -272,34 +272,14 @@ def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
     raise AllProvidersFailed(failures)
 
 
-def extract_json_value(text):
-    """Return the outermost balanced JSON object or array in `text`.
-
-    Models wrap the payload in prose ("Here is the review:"), append a closing
-    remark, or both, even when asked for JSON only. Slicing to the outermost
-    balanced delimiters recovers the value in those cases.
-
-    BOTH `{...}` and `[...]` are handled, and whichever opens first wins. An
-    earlier version looked only for a brace, which did not merely fail on a
-    bare array — it found the first object INSIDE the array and returned that,
-    so a decomposition of five tasks parsed cleanly as one and the other four
-    vanished with no error. decompose.py asks for "a JSON list of tasks", so an
-    array is its expected shape, not an edge case.
-
-    Quote- and escape-aware, so a delimiter inside a string value does not end
-    the scan.
-    """
-    stripped = strip_code_fence(text)
-    starts = [i for i in (stripped.find("{"), stripped.find("[")) if i != -1]
-    if not starts:
-        return stripped
-    start = min(starts)
-    opener = stripped[start]
+def _scan_balanced(text, start):
+    """Return the index just past the balanced region opening at `start`, or None."""
+    opener = text[start]
     closer = "}" if opener == "{" else "]"
     depth = 0
     in_string = False
     escaped = False
-    for i, ch in enumerate(stripped[start:], start):
+    for i, ch in enumerate(text[start:], start):
         if in_string:
             if escaped:
                 escaped = False
@@ -315,29 +295,74 @@ def extract_json_value(text):
         elif ch == closer:
             depth -= 1
             if depth == 0:
-                return stripped[start:i + 1]
-    return stripped[start:]
+                return i + 1
+    return None
 
 
-def _coerce_shape(parsed, expect):
+def iter_json_candidates(text, limit=20):
+    """Yield plausible JSON substrings from `text`, in order of appearance.
+
+    Models wrap the payload in prose, and that prose can itself contain
+    delimiters: `Here is the review [JSON]: {"summary":...}` opens with a
+    bracket that is not the payload. Taking only the FIRST delimiter reduced
+    that to `[JSON]`, which does not parse — so a perfectly usable response was
+    rejected and could report that every provider failed.
+
+    So every balanced region is offered as a candidate and the caller takes the
+    first that both parses and satisfies the expected shape. `limit` bounds the
+    scan on pathological input.
+    """
+    stripped = strip_code_fence(text)
+    yielded = 0
+    for i, ch in enumerate(stripped):
+        if ch not in "{[":
+            continue
+        end = _scan_balanced(stripped, i)
+        if end is None:
+            continue
+        yield stripped[i:end]
+        yielded += 1
+        if yielded >= limit:
+            return
+
+
+def _coerce_shape(parsed, expect, require_keys=None):
     """Return (value, error). error is None when the shape is usable.
 
-    A single object wrapped in a one-element array is unwrapped: models do this
-    routinely and the intent is unambiguous. Anything else of the wrong shape is
-    reported so the caller can advance to the next provider.
+    A single object wrapped in a one-element array is unwrapped — but ONLY when
+    that element actually looks like the requested envelope. Unwrapping any
+    one-element array is unsafe: if the reviewer returns a bare array holding
+    its single finding, unwrapping hands review_pr.py an issue object, which
+    has neither `summary` nor `issues`, so it posts "No actionable issues
+    found" and the model's only finding is silently lost — while still counting
+    as a completed review cycle. `require_keys` is how the caller says what an
+    envelope looks like; without at least one of those keys the array is
+    rejected and the next provider is tried instead.
     """
     if expect == "object":
         if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
-            return parsed[0], None
+            if not require_keys or any(k in parsed[0] for k in require_keys):
+                return parsed[0], None
+            return parsed, ("a one-element array whose element is not the expected "
+                            f"envelope (none of {sorted(require_keys)} present)")
         if not isinstance(parsed, dict):
             return parsed, f"a JSON {type(parsed).__name__}"
+        # The envelope check applies to a bare object too, not just to an
+        # unwrapped one. Candidate iteration offers every balanced region, so
+        # the object INSIDE `[{"title": ...}]` is itself a candidate — without
+        # this it would be accepted as the envelope through the back door,
+        # reopening exactly the silent-finding-loss the unwrap guard closes.
+        if require_keys and not any(k in parsed for k in require_keys):
+            return parsed, ("a JSON object that is not the expected envelope "
+                            f"(none of {sorted(require_keys)} present)")
     elif expect == "array":
         if not isinstance(parsed, list):
             return parsed, f"a JSON {type(parsed).__name__}"
     return parsed, None
 
 
-def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None):
+def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None,
+                  require_keys=None):
     """Call providers until one returns output that actually parses as JSON.
 
     A 200 response carrying unparseable content used to be treated as success,
@@ -379,24 +404,31 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
             failures.append(exc)
             print(f"⚠️  {exc}")
             continue
-        candidate = extract_json_value(raw)
-        try:
-            parsed = json.loads(candidate, strict=False)
-        except json.JSONDecodeError as exc:
-            failures.append(ProviderError(
-                provider["tier"], provider["model"], "returned unparseable JSON",
-                f"{exc} | first 200 chars: {candidate[:200]!r}"))
+        parsed = None
+        shape_error = None
+        parse_error = None
+        last_candidate = ""
+        for candidate in iter_json_candidates(raw):
+            last_candidate = candidate
+            try:
+                value = json.loads(candidate, strict=False)
+            except json.JSONDecodeError as exc:
+                parse_error = f"{exc} | first 200 chars: {candidate[:200]!r}"
+                continue
+            if expect:
+                value, shape_error = _coerce_shape(value, expect, require_keys)
+                if shape_error:
+                    continue
+            parsed = value
+            break
+        if parsed is None:
+            reason = (f"returned {shape_error}" if shape_error
+                      else "returned no usable JSON")
+            detail = parse_error or f"candidate: {last_candidate[:200]!r}" or "empty response"
+            failures.append(ProviderError(provider["tier"], provider["model"],
+                                          reason, detail))
             print(f"⚠️  {failures[-1]}")
             continue
-        if expect:
-            parsed, shape_error = _coerce_shape(parsed, expect)
-            if shape_error:
-                failures.append(ProviderError(
-                    provider["tier"], provider["model"],
-                    f"returned {shape_error} where a JSON {expect} was expected",
-                    f"first 200 chars: {candidate[:200]!r}"))
-                print(f"⚠️  {failures[-1]}")
-                continue
         _announce(used)
         return parsed, used
     raise AllProvidersFailed(failures)
@@ -479,4 +511,49 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
             print(f"  FAIL  {_name}: error={_err!r} value={_out!r}")
             _failures += 1
     print(f"{len(_SHAPE_CASES)} shape contracts checked")
+
+    # Envelope guard: a lone finding must never be mistaken for a review
+    # envelope, whether it arrives wrapped in an array or as a bare object
+    # (candidate iteration offers both). Losing it would post "No actionable
+    # issues found" over the model's only finding.
+    _ENVELOPE = ("summary", "issues")
+    _FINDING = {"title": "a bug", "description": "d", "severity": "high"}
+    _ENV_CASES = [
+        ("lone finding in an array rejected", [_FINDING], True),
+        ("lone finding as a bare object rejected", _FINDING, True),
+        ("real envelope in an array unwrapped", [{"summary": "s", "issues": []}], False),
+        ("real envelope accepted", {"summary": "s", "issues": []}, False),
+        ("envelope with only issues accepted", {"issues": []}, False),
+    ]
+    for _name, _value, _should_error in _ENV_CASES:
+        _out, _err = _coerce_shape(_value, "object", _ENVELOPE)
+        if bool(_err) == _should_error:
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: error={_err!r}")
+            _failures += 1
+    print(f"{len(_ENV_CASES)} envelope contracts checked")
+
+    # Candidate iteration must look past prose delimiters.
+    _CANDIDATE_CASES = [
+        ('Here is the review [JSON]: {"summary":"ok","issues":[]}', "summary"),
+        ('Notes [1,2] then {"summary":"ok"}', "summary"),
+        ('{"summary":"ok","issues":[]}', "summary"),
+    ]
+    for _raw, _key in _CANDIDATE_CASES:
+        _found = None
+        for _cand in iter_json_candidates(_raw):
+            try:
+                _v = json.loads(_cand, strict=False)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(_v, dict) and _key in _v:
+                _found = _v
+                break
+        if _found:
+            print(f"  ok    recovered payload past prose: {_raw[:34]!r}")
+        else:
+            print(f"  FAIL  could not recover from {_raw!r}")
+            _failures += 1
+    print(f"{len(_CANDIDATE_CASES)} candidate-scan cases checked")
     raise SystemExit(1 if _failures else 0)

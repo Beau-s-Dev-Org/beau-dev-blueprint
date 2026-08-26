@@ -252,7 +252,8 @@ DIFF:
 """
 
     try:
-        result, provider = call_json_llm("REVIEW", prompt, model_override=model_override, expect="object")
+        result, provider = call_json_llm("REVIEW", prompt, model_override=model_override,
+                                          expect="object", require_keys=("summary", "issues"))
     except AllProvidersFailed as e:
         # Every configured provider failed. This must be unmistakable on the PR
         # itself, not just a traceback in the Actions log — a dead reviewer went
@@ -290,9 +291,17 @@ DIFF:
 
     # Post the human-readable review as a PR comment.
     issue_count = len(issues)
+    # Say "escalated" only when the escalation override is what actually served
+    # the review. Keying off cycle_count alone claimed escalation whenever the
+    # cycle threshold was passed — including with ESCALATE_MODEL unset (the
+    # default), and when a configured escalation model failed and a fallback
+    # tier answered instead. A note that misreports which model reviewed the
+    # code is the same defect class as a check that reports green without
+    # running.
+    escalated = bool(model_override) and model_name == model_override
     model_note = (
         f"🔬 _Model escalated to **{model_name}** (review cycle {cycle_count + 1})._"
-        if cycle_count >= ESCALATE_AFTER_CYCLES
+        if escalated
         else f"_Review cycle {cycle_count + 1} · model: {model_name}_"
     )
     if issue_count:
