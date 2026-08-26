@@ -6,7 +6,10 @@ resolves. Keep this module free of side effects — no API clients, no env
 reads at import time — so importing it is always safe.
 """
 
+import os
 import re
+
+import requests
 
 # Opening fence with an optional language tag, the payload, and a closing
 # fence that may be glued to the end of the payload rather than on its own
@@ -66,6 +69,184 @@ def strip_code_fence(content):
     while body.endswith("`"):
         body = body[:-1].rstrip()
     return body
+
+
+# ── LLM provider chain ──────────────────────────────────────────────────────
+# Naming a model in code is what broke this pipeline for a month: qwen3-coder-next
+# was retired 2026-07-15 and every review 410'd until someone edited the source
+# (BEA-428). Two changes remove that class of failure:
+#
+#   1. The primary provider is a ROUTER (OpenRouter's openrouter/auto), which
+#      picks a live model per request. A router has no version to retire.
+#   2. Every model name, endpoint, and key is CONFIG, never a constant. The next
+#      change is a workflow input or a repo secret, not a pull request.
+#
+# A router still fails — most obviously when the account runs out of credits,
+# which is a 402, not a 410. So the chain carries ordered fallbacks, mirroring
+# the shape the OCR reusable workflow in this repo already uses: each tier is a
+# (url, key, model) triple, and a tier counts as configured only when all three
+# are present. Unconfigured tiers are skipped silently; a partially configured
+# tier is reported, because a fallback that looks wired and is not is worse than
+# no fallback at all.
+
+DEFAULT_ENDPOINTS = {
+    "primary": "https://openrouter.ai/api/v1",
+    "fallback1": "https://ollama.com/v1",
+    "fallback2": "",
+}
+DEFAULT_MODELS = {
+    "primary": "openrouter/auto",
+    "fallback1": "glm-5.2:cloud",
+    "fallback2": "",
+}
+
+
+class ProviderError(Exception):
+    """One provider failed in a way that should advance to the next tier."""
+
+    def __init__(self, tier, model, reason, detail):
+        self.tier = tier
+        self.model = model
+        self.reason = reason
+        self.detail = detail
+        super().__init__(f"{tier} ({model}): {reason} — {detail}")
+
+
+class AllProvidersFailed(Exception):
+    """Every configured provider failed. Carries each tier's reason."""
+
+    def __init__(self, failures):
+        self.failures = failures
+        super().__init__(
+            "all configured LLM providers failed: "
+            + "; ".join(f"{f.tier} ({f.model}) {f.reason}" for f in failures)
+        )
+
+
+def build_provider_chain(purpose, model_override=None):
+    """Return the ordered list of configured providers for `purpose`.
+
+    `purpose` is a prefix such as "REVIEW" or "DECOMP", so the two scripts can
+    run different models over the same endpoints. `model_override` replaces the
+    PRIMARY tier's model only (used for review escalation); fallbacks keep their
+    configured models, since an escalation target is not necessarily available
+    at every provider.
+
+    Environment, per tier (primary has no suffix; fallbacks use _FALLBACK1/2):
+        LLM_URL[_FALLBACKn]        endpoint base, OpenAI-compatible
+        LLM_API_KEY[_FALLBACKn]    bearer token
+        <PURPOSE>_MODEL[_FALLBACKn]  model name at that endpoint
+    """
+    providers = []
+    partial = []
+    for tier, suffix in (("primary", ""), ("fallback1", "_FALLBACK1"), ("fallback2", "_FALLBACK2")):
+        url = os.getenv(f"LLM_URL{suffix}", DEFAULT_ENDPOINTS[tier]).strip().rstrip("/")
+        key = os.getenv(f"LLM_API_KEY{suffix}", "").strip()
+        model = os.getenv(f"{purpose}_MODEL{suffix}", DEFAULT_MODELS[tier]).strip()
+        if tier == "primary" and model_override:
+            model = model_override
+        present = [bool(url), bool(key), bool(model)]
+        if all(present):
+            providers.append({"tier": tier, "url": url, "key": key, "model": model})
+        elif any(present):
+            missing = [
+                name
+                for name, ok in zip(("url", "api key", "model"), present)
+                if not ok
+            ]
+            partial.append(f"{tier} (missing {', '.join(missing)})")
+    if partial:
+        # Loud on purpose: a half-configured tier is the silent-failure shape —
+        # it reads as "we have a fallback" and provides none.
+        print(f"⚠️  Ignoring partially configured provider tier(s): {'; '.join(partial)}")
+    return providers
+
+
+def _classify(status, body):
+    """Map an HTTP status to a human reason. All of these advance to the next tier."""
+    if status == 402:
+        return "out of credits / payment required"
+    if status in (401, 403):
+        return "authentication rejected"
+    if status == 404:
+        return "model or endpoint not found"
+    if status == 410:
+        return "model retired"
+    if status == 429:
+        return "rate limited"
+    if status and status >= 500:
+        return f"provider error (HTTP {status})"
+    lowered = (body or "").lower()
+    for needle, reason in (
+        ("retired", "model retired"),
+        ("insufficient", "out of credits / payment required"),
+        ("quota", "quota exhausted"),
+    ):
+        if needle in lowered:
+            return reason
+    return f"HTTP {status}" if status else "request failed"
+
+
+def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
+    """Call the first provider that answers; return (content, provider).
+
+    Raises AllProvidersFailed when every configured tier fails, with a per-tier
+    reason. It never returns a sentinel or an empty string on failure: a caller
+    must not be able to mistake "no provider answered" for "the model had
+    nothing to say" — that conflation is the defect BEA-428 exists to remove.
+    """
+    providers = build_provider_chain(purpose, model_override)
+    if not providers:
+        raise AllProvidersFailed(
+            [ProviderError("primary", "<unset>", "not configured",
+                           f"set LLM_URL / LLM_API_KEY / {purpose}_MODEL")]
+        )
+
+    failures = []
+    for provider in providers:
+        payload = {
+            "model": provider["model"],
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        try:
+            response = requests.post(
+                f"{provider['url']}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {provider['key']}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            failures.append(ProviderError(provider["tier"], provider["model"],
+                                          "endpoint unreachable", str(exc)))
+            print(f"⚠️  {failures[-1]}")
+            continue
+
+        if response.status_code != 200:
+            body = (response.text or "")[:400]
+            failures.append(ProviderError(provider["tier"], provider["model"],
+                                          _classify(response.status_code, body), body))
+            print(f"⚠️  {failures[-1]}")
+            continue
+
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            failures.append(ProviderError(provider["tier"], provider["model"],
+                                          "unreadable response shape", str(exc)))
+            print(f"⚠️  {failures[-1]}")
+            continue
+
+        if provider["tier"] != "primary":
+            print(f"↩️  Primary unavailable; served by {provider['tier']} "
+                  f"({provider['model']}).")
+        return content, provider
+
+    raise AllProvidersFailed(failures)
 
 
 if __name__ == "__main__":  # pragma: no cover - runnable self-check

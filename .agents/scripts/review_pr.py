@@ -3,12 +3,10 @@ import os
 import subprocess
 
 import requests
-from ollama import Client
 
-from _shared import strip_code_fence
+from _shared import AllProvidersFailed, call_llm, strip_code_fence
 
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-OLLAMA_CLOUD_API_KEY = os.environ["OLLAMA_CLOUD_API_KEY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
 REPO = os.environ["REPO"]
 
@@ -46,10 +44,6 @@ if NOTICE_MARKER.startswith(REVIEW_MARKER):
         "with no review behind it (BEA-428)."
     )
 
-client = Client(
-    host="https://ollama.com",
-    headers={"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"},
-)
 
 
 
@@ -180,20 +174,18 @@ def main():
     truncated_diff = diff[:MAX_DIFF_CHARS]
 
     # ── Model selection with escalation ─────────────────────────────────────
-    # qwen3-coder-next / qwen3-235b-a22b were retired by Ollama Cloud on
-    # 2026-07-15 (BEA-428); glm-5.2:cloud confirmed live via a real chat call
-    # on 2026-08-25.
-    default_model = os.getenv("REVIEW_MODEL", "glm-5.2:cloud")
-    escalate_model = os.getenv("ESCALATE_MODEL", default_model)
-    if cycle_count >= ESCALATE_AFTER_CYCLES:
-        model_name = escalate_model
-        print(
-            f"⬆️  Escalating to stronger model '{model_name}' "
-            f"after {cycle_count} completed cycle(s)."
-        )
+    # No model is named here. The primary provider is a router (openrouter/auto
+    # by default) and every name lives in workflow config, so a retirement is a
+    # settings change rather than a code change (BEA-428). ESCALATE_MODEL, when
+    # set, overrides the PRIMARY tier only — an escalation target is not
+    # necessarily available at a fallback endpoint.
+    escalate_model = os.getenv("ESCALATE_MODEL", "").strip()
+    model_override = None
+    if cycle_count >= ESCALATE_AFTER_CYCLES and escalate_model:
+        model_override = escalate_model
+        print(f"⬆️  Escalating to '{escalate_model}' after {cycle_count} completed cycle(s).")
     else:
-        model_name = default_model
-        print(f"🤖 Using model '{model_name}' (cycle {cycle_count + 1}).")
+        print(f"🤖 Reviewing (cycle {cycle_count + 1}).")
 
     prompt = f"""You are an expert code reviewer. Review the following pull request diff.
 
@@ -212,43 +204,39 @@ DIFF:
 """
 
     try:
-        response = client.chat(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            format="json",
+        raw, provider = call_llm("REVIEW", prompt, model_override=model_override)
+    except AllProvidersFailed as e:
+        # Every configured provider failed. This must be unmistakable on the PR
+        # itself, not just a traceback in the Actions log — a dead reviewer went
+        # unnoticed for a month precisely because the only signal was buried
+        # (BEA-428). The notice carries NOTICE_MARKER, so it is NOT counted as a
+        # completed review cycle and cannot push this PR toward the circuit
+        # breaker.
+        rows = "\n".join(
+            f"| `{f.tier}` | `{f.model}` | {f.reason} |" for f in e.failures
         )
-    except Exception as e:
-        # A retired/unavailable model used to fail only as a bare traceback in
-        # the Actions log — the PR check went red, but nothing on the PR
-        # itself said why, which is how this went unnoticed for a month
-        # (BEA-428). Detect the retired/unavailable shape, post an explicit
-        # PR comment naming the cause, and still re-raise so the check stays
-        # red (this is a louder failure, not a quieter one).
-        msg = str(e)
-        is_dead_model = "410" in msg or "retired" in msg.lower() or "not found" in msg.lower()
-        if is_dead_model:
-            try:
-                post_comment(
-                    f"{NOTICE_MARKER} — ❌ REVIEWER UNAVAILABLE\n\n"
-                    f"The configured model **`{model_name}`** was rejected by Ollama "
-                    f"Cloud (likely retired). This check failing red means **no "
-                    f"automated review ran on this PR** — do not treat a merge over "
-                    f"this as reviewed.\n\n"
-                    f"Fix: update `REVIEW_MODEL`/`ESCALATE_MODEL` in "
-                    f"`.github/workflows/reviewer-agent.yml` to a current model, "
-                    f"verified live with a real chat call, not just presence in a "
-                    f"model list.\n\n"
-                    f"```\n{msg}\n```"
-                )
-            except Exception as comment_err:
-                print(f"⚠️  Also failed to post the failure comment: {comment_err}")
-            raise RuntimeError(
-                f"❌ MODEL UNAVAILABLE: '{model_name}' was rejected by Ollama Cloud "
-                f"(likely retired). Original error: {msg}"
-            ) from e
-        raise RuntimeError(f"Ollama API call failed: {msg}") from e
+        try:
+            post_comment(
+                f"{NOTICE_MARKER} — ❌ REVIEWER UNAVAILABLE\n\n"
+                f"Every configured LLM provider failed, so **no automated review "
+                f"ran on this PR** — do not treat a merge over this as reviewed.\n\n"
+                f"| Tier | Model | Failure |\n| --- | --- | --- |\n{rows}\n\n"
+                f"Most failures here are account or configuration problems rather "
+                f"than code: an exhausted credit balance (`payment required`), a "
+                f"rotated key (`authentication rejected`), or a retired model "
+                f"(`model retired`). Fix the affected tier's `LLM_URL*` / "
+                f"`LLM_API_KEY*` / `REVIEW_MODEL*` settings — no code change "
+                f"should be needed.\n\n"
+                f"```\n{e}\n```"
+            )
+        except Exception as comment_err:
+            print(f"⚠️  Also failed to post the failure comment: {comment_err}")
+        # Re-raise so the check stays red. A reviewer that could not run must
+        # never present as a passing check.
+        raise RuntimeError(f"❌ NO REVIEW RAN: {e}") from e
 
-    content = strip_code_fence(response.message.content)
+    model_name = provider["model"]
+    content = strip_code_fence(raw)
     try:
         result = json.loads(content)
     except json.JSONDecodeError as e:

@@ -23,26 +23,37 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install ollama requests
+        run: pip install requests
 
       - name: Run PR Reviewer Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          # qwen3-coder-next and qwen3-235b-a22b were both retired by Ollama
-          # Cloud on 2026-07-15 (HTTP 410) — see BEA-428. Confirmed live via a
-          # real ollama_chat call on 2026-08-25: glm-5.2:cloud and
-          # deepseek-v4-pro:cloud both respond. NOTE: a model appearing in a
-          # local `ollama list` (or being cached from a prior session) is NOT
-          # proof it is live on Ollama Cloud — glm-4.7:cloud and
-          # qwen3-coder:480b-cloud were both also found retired during this
-          # audit despite looking current. Verify any future replacement with
-          # a real chat call before relying on it here.
-          REVIEW_MODEL: "glm-5.2:cloud"
-          # After ESCALATE_AFTER_CYCLES completed review cycles on the same PR,
-          # switch to this stronger model for deeper analysis.
-          ESCALATE_MODEL: "deepseek-v4-pro:cloud"
+          # ── LLM provider chain ──────────────────────────────────────
+          # No model is pinned as the primary. openrouter/auto is a ROUTER: it
+          # picks a live model per request, so it has no version that can be
+          # retired out from under this workflow (BEA-428, where a pinned
+          # qwen3 model 410'd every review for a month).
+          #
+          # A router still fails — most often on an exhausted credit balance,
+          # which returns 402, not 410. Fallback 1 is a separate account and
+          # endpoint so a funding or key problem at one provider does not stop
+          # reviews. Tiers are tried in order; a tier with any of URL / key /
+          # model missing is skipped and announced in the log.
+          #
+          # These are settings, not code. Changing a model or endpoint here
+          # needs no source edit.
+          LLM_URL: "https://openrouter.ai/api/v1"
+          LLM_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          REVIEW_MODEL: "openrouter/auto"
+          LLM_URL_FALLBACK1: "https://ollama.com/v1"
+          LLM_API_KEY_FALLBACK1: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
+          REVIEW_MODEL_FALLBACK1: "glm-5.2:cloud"
+          # Escalation is OFF by default and deliberately so: naming a specific
+          # stronger model reintroduces exactly the retirement risk the router
+          # removes. Set it to pin one, accepting that it must be re-verified
+          # whenever that model is deprecated. Empty = the router keeps routing.
+          ESCALATE_MODEL: ""
           ESCALATE_AFTER_CYCLES: "2"
           # Hard cap: halt the loop entirely after this many completed cycles to
           # prevent runaway token usage.

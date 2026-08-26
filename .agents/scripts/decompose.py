@@ -6,15 +6,9 @@ import sys
 from datetime import datetime
 
 import yaml
-from ollama import Client
 
-from _shared import strip_code_fence
+from _shared import AllProvidersFailed, call_llm, strip_code_fence
 
-# 1. Setup the Cloud Connection
-client = Client(
-    host='https://ollama.com',
-    headers={'Authorization': f"Bearer {os.environ.get('OLLAMA_CLOUD_API_KEY')}"}
-)
 
 def create_issue(task):
     """Uses GitHub CLI to create the issue with labels."""
@@ -46,34 +40,30 @@ def main():
         proposal_content = f.read()
 
     # 2. Call the AI
-    # qwen3-coder-next was retired by Ollama Cloud on 2026-07-15 (BEA-428);
-    # glm-5.2:cloud confirmed live via a real chat call on 2026-08-25.
-    model_name = os.getenv("DECOMP_MODEL", "glm-5.2:cloud")
-
+    # No model is named here. The primary provider is a router and every model
+    # name lives in workflow config, so a retirement is a settings change, not a
+    # code change (BEA-428). Ordered fallbacks cover the failures a router does
+    # not solve — chiefly an exhausted credit balance, which is a 402.
+    prompt = (
+        "Decompose this proposal into a JSON list of tasks. Use 'task' for the "
+        f"title and 'description' for the details: {proposal_content}"
+    )
     try:
-        response = client.chat(
-            model=model_name,
-            messages=[{'role': 'user', 'content': f"Decompose this proposal into a JSON list of tasks. Use 'task' for the title and 'description' for the details: {proposal_content}"}],
-            format='json'
-        )
-    except Exception as e:
-        # Make a retired/unavailable model fail with an unmistakable message
-        # instead of a bare traceback a human has to click into to diagnose
-        # (BEA-428: this is what let a dead model go unnoticed for a month).
-        msg = str(e)
-        if "410" in msg or "retired" in msg.lower() or "not found" in msg.lower():
-            raise RuntimeError(
-                f"❌ MODEL UNAVAILABLE: DECOMP_MODEL '{model_name}' was rejected "
-                f"by Ollama Cloud (likely retired). Pick a current model and verify "
-                f"it responds with a real ollama_chat call before using it here. "
-                f"Original error: {msg}"
-            ) from e
-        raise RuntimeError(f"Ollama API call failed: {msg}") from e
+        raw, provider = call_llm("DECOMP", prompt)
+    except AllProvidersFailed as e:
+        # Fail loudly and specifically. A decomposition that silently produced
+        # no tasks would look identical to a proposal with nothing to do.
+        raise RuntimeError(
+            f"❌ NO DECOMPOSITION RAN: every configured LLM provider failed. "
+            f"{e}\n\nMost causes are account or configuration problems rather "
+            f"than code — an exhausted credit balance, a rotated key, or a "
+            f"retired model. Fix the affected tier's LLM_URL* / LLM_API_KEY* / "
+            f"DECOMP_MODEL* settings."
+        ) from e
+    model_name = provider["model"]
 
     # 3. Clean up the response (Remove Markdown backticks if present)
-    content = response.message.content
-    print(f"DEBUG: AI Response: {content}") 
-    content = strip_code_fence(content)
+    content = strip_code_fence(raw)
 
     # 4. Parse and Create Issues
     tasks_data = json.loads(content)
