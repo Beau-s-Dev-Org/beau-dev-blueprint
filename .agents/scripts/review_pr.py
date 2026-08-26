@@ -21,13 +21,49 @@ ESCALATE_AFTER_CYCLES = int(os.getenv("ESCALATE_AFTER_CYCLES", "2"))
 # Hard cap: after this many completed cycles the loop is stopped entirely to
 # prevent runaway token consumption.
 MAX_REVIEW_CYCLES = int(os.getenv("MAX_REVIEW_CYCLES", "3"))
-# Sentinel string used to identify automated review comments when counting cycles.
+# Sentinel string used to identify COMPLETED automated review comments when
+# counting cycles. Only a comment representing a real, model-backed review may
+# carry this prefix.
 REVIEW_MARKER = "## 🤖 Automated PR Review"
+# Sentinel for diagnostic notices that are NOT completed reviews (e.g. the
+# reviewer being unavailable). This must NOT start with REVIEW_MARKER: cycle
+# counting uses str.startswith, so a shared prefix would make a failed API call
+# count as a completed review — three of those would trip the circuit breaker
+# and turn "no review ran" into a green check with no review behind it, which
+# is the exact defect BEA-428 exists to remove.
+NOTICE_MARKER = "## ⚠️ Automated Review Notice"
+assert not NOTICE_MARKER.startswith(REVIEW_MARKER), (
+    "NOTICE_MARKER must not share REVIEW_MARKER's prefix — see BEA-428."
+)
 
 client = Client(
     host="https://ollama.com",
     headers={"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"},
 )
+
+
+
+def _strip_code_fence(content):
+    """Return `content` with a surrounding Markdown code fence removed, if present.
+
+    Models differ on whether they honour a JSON response format literally or
+    wrap the object in a ```json fence. qwen3-coder-next returned bare JSON, so
+    this script fed the raw string straight to json.loads(); glm-5.2 fences its
+    output, which surfaced as `Expecting value: line 1 column 1` the moment the
+    model was swapped (BEA-428). Strip the fence rather than depend on any
+    particular model's formatting habits.
+
+    Only a fence that opens the content is removed, so a JSON string that merely
+    contains a fenced block in one of its values is left intact.
+    """
+    text = (content or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    lines = lines[1:]  # drop the opening ``` (with or without a language tag)
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 def get_review_cycle_count():
@@ -36,6 +72,11 @@ def get_review_cycle_count():
     Scans all PR comments for the REVIEW_MARKER sentinel to determine how many
     times the automated reviewer has already posted, which is used to enforce
     the escalation threshold and the hard cap.
+
+    Only comments representing a real, model-backed review are counted.
+    Diagnostic notices carry NOTICE_MARKER instead, so an unavailable reviewer
+    keeps failing red rather than accumulating toward the cap and eventually
+    passing with no review behind it.
     """
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
     headers = {
@@ -201,7 +242,7 @@ DIFF:
         if is_dead_model:
             try:
                 post_comment(
-                    f"{REVIEW_MARKER} — ❌ REVIEWER UNAVAILABLE\n\n"
+                    f"{NOTICE_MARKER} — ❌ REVIEWER UNAVAILABLE\n\n"
                     f"The configured model **`{model_name}`** was rejected by Ollama "
                     f"Cloud (likely retired). This check failing red means **no "
                     f"automated review ran on this PR** — do not treat a merge over "
@@ -220,7 +261,7 @@ DIFF:
             ) from e
         raise RuntimeError(f"Ollama API call failed: {msg}") from e
 
-    content = response.message.content.strip()
+    content = _strip_code_fence(response.message.content)
     try:
         result = json.loads(content)
     except json.JSONDecodeError as e:
