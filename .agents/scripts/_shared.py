@@ -445,28 +445,34 @@ def _select_payload(raw, expect, require_keys, validate):
     broken_until = -1
     for begin, stop, candidate in iter_json_candidates(raw):
         if begin < broken_until:
-            # Nested inside a candidate that failed to parse: a fragment of
-            # something broken, not an alternative payload. Accepting it
-            # silently discards whatever the rest of that structure held.
+            # Nested inside a candidate that was REJECTED — for any reason, not
+            # only a parse error. A fragment of a rejected structure is not an
+            # alternative payload: it is part of something the model did not
+            # offer as the answer. Accepting one fabricates a result out of a
+            # nested field, e.g. {"note": "...", "extra": {"summary": ...}}
+            # yielding a review the model never wrote; and for a broken array it
+            # silently discards every element but the first.
             continue
         tried += 1
         excerpt = f"candidate: {candidate[:200]!r}"
         try:
             value = json.loads(candidate, strict=False)
         except json.JSONDecodeError as exc:
-            broken_until = max(broken_until, stop)
+            broken_until = max(broken_until, stop)          # fragments of broken JSON
             if reason is None:
                 reason, detail = "returned unparseable JSON", f"{exc} | {excerpt}"
             continue
         if expect:
             value, shape_error = _coerce_shape(value, expect, require_keys)
             if shape_error:
+                broken_until = max(broken_until, stop)      # fragments of a rejected value
                 if reason is None:
                     reason, detail = f"returned {shape_error}", excerpt
                 continue
         if validate:
             content_error = validate(value)
             if content_error:
+                broken_until = max(broken_until, stop)      # fragments of a rejected value
                 if reason is None:
                     reason, detail = f"returned {content_error}", excerpt
                 continue
@@ -742,6 +748,28 @@ if __name__ == "__main__":  # pragma: no cover - runnable self-check
         ("fragment of a broken array", '[{"task":"a"},{"task":"b"},]', True),
         ("disjoint payload after prose", 'Here [JSON]: {"task":"a"}', False),
     ]
+    # Rejection-aware nesting: a fragment inside a candidate rejected for ANY
+    # reason — not only a parse error — must not be accepted, or a nested field
+    # becomes a fabricated payload the model never offered.
+    _NEST_CASES = [
+        ("nested envelope in rejected parent",
+         '{"note":"x","extra":{"summary":"FAB","issues":[]}}', "object", review_issues, True),
+        ("nested task in rejected parent",
+         '{"note":"x","example":{"task":"FAB"}}', None, decomposition_tasks, True),
+        ("disjoint payload after a rejected array",
+         '[1,2] then {"summary":"real","issues":[]}', "object", review_issues, False),
+        ("plain valid envelope",
+         '{"summary":"real","issues":[]}', "object", review_issues, False),
+    ]
+    for _name, _raw, _expect, _val, _should_reject in _NEST_CASES:
+        _v, _r, _d, _n = _select_payload(
+            _raw, _expect, ("summary", "issues") if _expect else None, _val)
+        if (_v is None) == _should_reject:
+            print(f"  ok    {_name}")
+        else:
+            print(f"  FAIL  {_name}: accepted={_v!r}")
+            _failures += 1
+    print(f"{len(_NEST_CASES)} rejection-nesting contracts checked")
     for _name, _raw, _expect_none in _SPAN_CASES:
         _accepted = None
         _broken_until = -1
