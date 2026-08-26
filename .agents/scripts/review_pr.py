@@ -9,8 +9,8 @@ OLLAMA_CLOUD_API_KEY = os.environ["OLLAMA_CLOUD_API_KEY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
 REPO = os.environ["REPO"]
 
-# qwen3-coder-next has a large context window; 8000 chars keeps the prompt well
-# within limits while covering the most meaningful parts of most PR diffs.
+# The review model has a large context window; 8000 chars keeps the prompt
+# well within limits while covering the most meaningful parts of most PR diffs.
 MAX_DIFF_CHARS = 8000
 
 # ── Loop-safety controls ────────────────────────────────────────────────────
@@ -152,7 +152,10 @@ def main():
     truncated_diff = diff[:MAX_DIFF_CHARS]
 
     # ── Model selection with escalation ─────────────────────────────────────
-    default_model = os.getenv("REVIEW_MODEL", "qwen3-coder-next")
+    # qwen3-coder-next / qwen3-235b-a22b were retired by Ollama Cloud on
+    # 2026-07-15 (BEA-428); glm-5.2:cloud confirmed live via a real chat call
+    # on 2026-08-25.
+    default_model = os.getenv("REVIEW_MODEL", "glm-5.2:cloud")
     escalate_model = os.getenv("ESCALATE_MODEL", default_model)
     if cycle_count >= ESCALATE_AFTER_CYCLES:
         model_name = escalate_model
@@ -187,7 +190,35 @@ DIFF:
             format="json",
         )
     except Exception as e:
-        raise RuntimeError(f"Ollama API call failed: {e}") from e
+        # A retired/unavailable model used to fail only as a bare traceback in
+        # the Actions log — the PR check went red, but nothing on the PR
+        # itself said why, which is how this went unnoticed for a month
+        # (BEA-428). Detect the retired/unavailable shape, post an explicit
+        # PR comment naming the cause, and still re-raise so the check stays
+        # red (this is a louder failure, not a quieter one).
+        msg = str(e)
+        is_dead_model = "410" in msg or "retired" in msg.lower() or "not found" in msg.lower()
+        if is_dead_model:
+            try:
+                post_comment(
+                    f"{REVIEW_MARKER} — ❌ REVIEWER UNAVAILABLE\n\n"
+                    f"The configured model **`{model_name}`** was rejected by Ollama "
+                    f"Cloud (likely retired). This check failing red means **no "
+                    f"automated review ran on this PR** — do not treat a merge over "
+                    f"this as reviewed.\n\n"
+                    f"Fix: update `REVIEW_MODEL`/`ESCALATE_MODEL` in "
+                    f"`.github/workflows/reviewer-agent.yml` to a current model, "
+                    f"verified live with a real chat call, not just presence in a "
+                    f"model list.\n\n"
+                    f"```\n{msg}\n```"
+                )
+            except Exception as comment_err:
+                print(f"⚠️  Also failed to post the failure comment: {comment_err}")
+            raise RuntimeError(
+                f"❌ MODEL UNAVAILABLE: '{model_name}' was rejected by Ollama Cloud "
+                f"(likely retired). Original error: {msg}"
+            ) from e
+        raise RuntimeError(f"Ollama API call failed: {msg}") from e
 
     content = response.message.content.strip()
     try:

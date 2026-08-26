@@ -30,10 +30,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }}
-          REVIEW_MODEL: "qwen3-coder-next"
+          # qwen3-coder-next and qwen3-235b-a22b were both retired by Ollama
+          # Cloud on 2026-07-15 (HTTP 410) — see BEA-428. Confirmed live via a
+          # real ollama_chat call on 2026-08-25: glm-5.2:cloud and
+          # deepseek-v4-pro:cloud both respond. NOTE: a model appearing in a
+          # local `ollama list` (or being cached from a prior session) is NOT
+          # proof it is live on Ollama Cloud — glm-4.7:cloud and
+          # qwen3-coder:480b-cloud were both also found retired during this
+          # audit despite looking current. Verify any future replacement with
+          # a real chat call before relying on it here.
+          REVIEW_MODEL: "glm-5.2:cloud"
           # After ESCALATE_AFTER_CYCLES completed review cycles on the same PR,
           # switch to this stronger model for deeper analysis.
-          ESCALATE_MODEL: "qwen3-235b-a22b"
+          ESCALATE_MODEL: "deepseek-v4-pro:cloud"
           ESCALATE_AFTER_CYCLES: "2"
           # Hard cap: halt the loop entirely after this many completed cycles to
           # prevent runaway token usage.

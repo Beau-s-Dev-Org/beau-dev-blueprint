@@ -43,13 +43,29 @@ def main():
         proposal_content = f.read()
 
     # 2. Call the AI
-    model_name = os.getenv("DECOMP_MODEL", "qwen3-coder-next")
-    
-    response = client.chat(
-        model=model_name,
-        messages=[{'role': 'user', 'content': f"Decompose this proposal into a JSON list of tasks. Use 'task' for the title and 'description' for the details: {proposal_content}"}],
-        format='json'
-    )
+    # qwen3-coder-next was retired by Ollama Cloud on 2026-07-15 (BEA-428);
+    # glm-5.2:cloud confirmed live via a real chat call on 2026-08-25.
+    model_name = os.getenv("DECOMP_MODEL", "glm-5.2:cloud")
+
+    try:
+        response = client.chat(
+            model=model_name,
+            messages=[{'role': 'user', 'content': f"Decompose this proposal into a JSON list of tasks. Use 'task' for the title and 'description' for the details: {proposal_content}"}],
+            format='json'
+        )
+    except Exception as e:
+        # Make a retired/unavailable model fail with an unmistakable message
+        # instead of a bare traceback a human has to click into to diagnose
+        # (BEA-428: this is what let a dead model go unnoticed for a month).
+        msg = str(e)
+        if "410" in msg or "retired" in msg.lower() or "not found" in msg.lower():
+            raise RuntimeError(
+                f"❌ MODEL UNAVAILABLE: DECOMP_MODEL '{model_name}' was rejected "
+                f"by Ollama Cloud (likely retired). Pick a current model and verify "
+                f"it responds with a real ollama_chat call before using it here. "
+                f"Original error: {msg}"
+            ) from e
+        raise RuntimeError(f"Ollama API call failed: {msg}") from e
 
     # 3. Clean up the response (Remove Markdown backticks if present)
     content = response.message.content

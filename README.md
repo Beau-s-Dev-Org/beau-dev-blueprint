@@ -99,8 +99,8 @@ The reviewer runs as a **GitHub Action** (`.github/workflows/reviewer-agent.yml`
 
 | Setting | Default | Description |
 |---|---|---|
-| `REVIEW_MODEL` | `qwen3-coder-next` | Model used for standard review cycles |
-| `ESCALATE_MODEL` | `qwen3-235b-a22b` | Stronger model used after `ESCALATE_AFTER_CYCLES` |
+| `REVIEW_MODEL` | `glm-5.2:cloud` | Model used for standard review cycles |
+| `ESCALATE_MODEL` | `deepseek-v4-pro:cloud` | Stronger model used after `ESCALATE_AFTER_CYCLES` |
 | `ESCALATE_AFTER_CYCLES` | `2` | Switch to escalation model after this many cycles |
 | `MAX_REVIEW_CYCLES` | `3` | Hard cap — halts the loop and requests human review |
 

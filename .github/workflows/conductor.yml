@@ -34,7 +34,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           # The Ollama library expects OLLAMA_API_KEY
           OLLAMA_CLOUD_API_KEY: ${{ secrets.OLLAMA_CLOUD_API_KEY }} 
-          DECOMP_MODEL: "qwen3-coder-next"
+          # qwen3-coder-next was retired by Ollama Cloud on 2026-07-15 (BEA-428).
+          # Confirmed live via a real ollama_chat call on 2026-08-25.
+          DECOMP_MODEL: "glm-5.2:cloud"
         run: |
          # If no file was found, don't crash, just exit quietly
          if [ -z "${{ steps.files.outputs.filename }}" ]; then
