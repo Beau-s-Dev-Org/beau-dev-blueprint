@@ -246,32 +246,6 @@ def _call_one(providers, prompt, timeout, json_mode=True):
     raise last
 
 
-def call_llm(purpose, prompt, model_override=None, timeout=180, json_mode=True):
-    """Call the first provider that answers; return (content, provider).
-
-    Raises AllProvidersFailed when every configured tier fails, with a per-tier
-    reason. It never returns a sentinel or an empty string on failure: a caller
-    must not be able to mistake "no provider answered" for "the model had
-    nothing to say" — that conflation is the defect BEA-428 exists to remove.
-    """
-    providers = build_provider_chain(purpose, model_override)
-    if not providers:
-        raise AllProvidersFailed(
-            [ProviderError("primary", "<unset>", "not configured",
-                           f"set LLM_URL / LLM_API_KEY / {purpose}_MODEL")]
-        )
-    failures = []
-    for provider in providers:
-        try:
-            content, used = _call_one([provider], prompt, timeout, json_mode)
-            _announce(used)
-            return content, used
-        except ProviderError as exc:
-            failures.append(exc)
-            print(f"⚠️  {exc}")
-    raise AllProvidersFailed(failures)
-
-
 def _scan_balanced(text, start):
     """Return the index just past the balanced region opening at `start`, or None."""
     opener = text[start]
@@ -474,33 +448,37 @@ def call_json_llm(purpose, prompt, model_override=None, timeout=180, expect=None
             failures.append(exc)
             print(f"⚠️  {exc}")
             continue
+        # Every rejection records BOTH its reason and its detail together, so
+        # the two always describe the same candidate. Holding them in separate
+        # variables that persisted across the loop let a reason from one
+        # candidate be reported beside a detail from another.
         parsed = None
-        shape_error = None
-        parse_error = None
-        last_candidate = ""
+        last_reason = None
+        last_detail = None
         for candidate in iter_json_candidates(raw):
-            last_candidate = candidate
+            excerpt = f"candidate: {candidate[:200]!r}"
             try:
                 value = json.loads(candidate, strict=False)
             except json.JSONDecodeError as exc:
-                parse_error = f"{exc} | first 200 chars: {candidate[:200]!r}"
+                last_reason, last_detail = "returned unparseable JSON", f"{exc} | {excerpt}"
                 continue
             if expect:
                 value, shape_error = _coerce_shape(value, expect, require_keys)
                 if shape_error:
+                    last_reason, last_detail = f"returned {shape_error}", excerpt
                     continue
             if validate:
-                shape_error = validate(value)
-                if shape_error:
+                content_error = validate(value)
+                if content_error:
+                    last_reason, last_detail = f"returned {content_error}", excerpt
                     continue
             parsed = value
             break
         if parsed is None:
-            reason = (f"returned {shape_error}" if shape_error
-                      else "returned no usable JSON")
-            detail = parse_error or f"candidate: {last_candidate[:200]!r}" or "empty response"
-            failures.append(ProviderError(provider["tier"], provider["model"],
-                                          reason, detail))
+            failures.append(ProviderError(
+                provider["tier"], provider["model"],
+                last_reason or "returned no usable JSON",
+                last_detail or "no JSON value found in the response"))
             print(f"⚠️  {failures[-1]}")
             continue
         _announce(used)
