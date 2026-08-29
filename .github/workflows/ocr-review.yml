@@ -25,16 +25,28 @@
 # fallback is skipped rather than failing on auth with a confusing message.
 # Leaving fallbacks unconfigured changes nothing.
 #
-# Fallback attempts set upload_artifacts: 'false'. The action names its
-# artifact ocr-review-result-<run_id>-<run_attempt>; a fallback runs in the
-# SAME job as the failed primary, so both attempts compute the same name and
-# the fallback's upload 409s ("artifact with this name already exists") —
-# which failed the whole composite AFTER a completed review, so a fully
-# successful fallback review still read as a failed attempt: the gate turned
-# the job red and the computed comments were never posted (observed live on
-# marketing-as-code PR #302 during the 2026-08-20 primary-provider outage).
-# The fallback's result JSON is still printed to the job log by the action;
-# only the downloadable artifact is given up, and only on the fallback path.
+# EVERY attempt sets upload_artifacts: 'false' — primary included (BEA-474).
+#
+# Inside the action the step order is: run review -> UPLOAD ARTIFACT ->
+# fail-on-error -> POST COMMENTS. The upload therefore sits between a
+# completed review and the posting of its findings, and those steps cannot be
+# reordered from here. Any upload failure aborts the composite before "Post
+# review comments" runs, so the review is computed, echoed to the job log, and
+# then silently discarded.
+#
+# Two live incidents, both of that shape. The artifact is named
+# ocr-review-result-<run_id>-<run_attempt>, and a fallback runs in the SAME job
+# as the failed primary, so both compute the same name and the second upload
+# 409s: marketing-as-code PR #302 during the 2026-08-20 primary-provider
+# outage, and beauzone/mac-engine#24 on 2026-08-28, where a completed review
+# that had found a real bug never reached the PR and was recovered only by
+# reading the raw job log. Disabling the fallback upload fixed the collision
+# but left the class open on the primary path, where a quota or a transient
+# 5xx does the same thing.
+#
+# The result JSON is still printed to the job log by the action's own
+# "=== OCR result ===" step. What is given up is a duplicate download; what is
+# bought is that a storage fault can no longer discard a review.
 #
 # The OCR action is pinned to a commit SHA (not @main) since it runs with
 # pull-requests: write and handles LLM/GitHub credentials.
@@ -189,6 +201,22 @@ jobs:
           llm_model: ${{ inputs.llm_model }}
           llm_use_anthropic: 'false'
           ocr_version: '1.8.6'
+          # The primary gives up its artifact too. Inside the action the step
+          # order is: run review -> UPLOAD ARTIFACT -> fail-on-error -> POST
+          # COMMENTS. The upload therefore sits between a completed review and
+          # the posting of its findings, and the action's steps cannot be
+          # reordered from here. Any upload failure — the run_id/run_attempt
+          # name colliding, a storage quota, a transient 5xx — aborts the
+          # composite before "Post review comments" runs, so the review is
+          # computed, printed to the job log, and then silently thrown away.
+          # That is not hypothetical: it happened on beauzone/mac-engine#24,
+          # where a completed review that had found a real bug never reached
+          # the PR and was only recovered by reading the raw job log (BEA-473,
+          # BEA-474). The result JSON is still echoed to the log by the action's
+          # own "=== OCR result ===" step, so what is given up is a duplicate
+          # download; what is bought is that a storage fault can no longer
+          # discard a review.
+          upload_artifacts: 'false'
           # For issue_comment triggers, pass the resolved refs; for
           # pull_request_target the action resolves them from the event.
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
@@ -261,5 +289,12 @@ jobs:
           FALLBACK2_OUTCOME: ${{ steps.ocr-fallback2.outcome }}
         shell: bash
         run: |
-          echo "::error::All configured OCR LLM backends failed (primary: ${PRIMARY_OUTCOME}, fallback1: ${FALLBACK1_OUTCOME}, fallback2: ${FALLBACK2_OUTCOME})."
+          # Deliberately does NOT claim the LLM backends failed. A step's
+          # `outcome` is failure if ANYTHING in that composite action failed —
+          # the LLM call, dependency install, checkout, comment posting — so
+          # naming the LLM here sends whoever debugs it to the wrong system.
+          # It did exactly that during the BEA-473 artifact-409 incident, where
+          # three LLM calls succeeded and this message still read "all backends
+          # failed". State what is known and point at where the cause is.
+          echo "::error::No OCR review attempt succeeded (primary: ${PRIMARY_OUTCOME}, fallback1: ${FALLBACK1_OUTCOME}, fallback2: ${FALLBACK2_OUTCOME}). This reports the *step* outcomes, which cover every stage of the review action, not the LLM call alone — open the failing attempt's log and read its last error before assuming a backend outage."
           exit 1
