@@ -1,0 +1,43 @@
+# OCR PR review for beau-dev-blueprint's own pull requests.
+#
+# This is the blueprint's local caller for the reusable workflow it publishes.
+# Consuming repos use templates/ocr-review-caller.yml, pinned to a commit SHA;
+# this repo calls the workflow by local path instead, so it always reviews with
+# the version on its own base branch and never needs a pin to itself.
+#
+# Config (Settings -> Secrets and variables -> Actions), same as any consumer:
+#   secret    OCR_LLM_URL          secret    OCR_LLM_AUTH_TOKEN
+#   variable  OCR_LLM_MODEL
+# Optional fallbacks: the same trio suffixed _FALLBACK1 / _FALLBACK2, plus the
+# optional OCR_LLM_USE_ANTHROPIC_FALLBACKn variables.
+#
+# Secrets are passed explicitly (never `secrets: inherit`).
+
+name: OpenCodeReview PR Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ocr:
+    uses: ./.github/workflows/ocr-review.yml
+    with:
+      llm_model: ${{ vars.OCR_LLM_MODEL }}
+      llm_model_fallback1: ${{ vars.OCR_LLM_MODEL_FALLBACK1 }}
+      llm_use_anthropic_fallback1: ${{ vars.OCR_LLM_USE_ANTHROPIC_FALLBACK1 }}
+      llm_model_fallback2: ${{ vars.OCR_LLM_MODEL_FALLBACK2 }}
+      llm_use_anthropic_fallback2: ${{ vars.OCR_LLM_USE_ANTHROPIC_FALLBACK2 }}
+    secrets:
+      OCR_LLM_URL: ${{ secrets.OCR_LLM_URL }}
+      OCR_LLM_AUTH_TOKEN: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
+      OCR_LLM_URL_FALLBACK1: ${{ secrets.OCR_LLM_URL_FALLBACK1 }}
+      OCR_LLM_AUTH_TOKEN_FALLBACK1: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 }}
+      OCR_LLM_URL_FALLBACK2: ${{ secrets.OCR_LLM_URL_FALLBACK2 }}
+      OCR_LLM_AUTH_TOKEN_FALLBACK2: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 }}
