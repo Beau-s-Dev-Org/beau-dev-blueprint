@@ -2,8 +2,9 @@
 
 Shared reusable CI workflows plus the project template used across Beau's
 repos. v2 of this repo is in progress — see the design doc,
-`beau-dev-blueprint-v2-design.md`, for the full plan. This PR (BEA-508) is
-step one: pruning retired material and moving machine-bootstrap files out to
+[`docs/blueprint-v2-design.md`](docs/blueprint-v2-design.md), for the full plan.
+This PR (BEA-508) is step one: pruning retired material and moving
+machine-bootstrap files out to
 [`beau-dev-machine`](https://github.com/Beau-s-Dev-Org/beau-dev-machine).
 
 ## The reusable OCR review workflow
@@ -45,9 +46,11 @@ Re-run `scripts/rollout-ocr.sh` (optionally with `BLUEPRINT_REF=<sha-or-tag>`)
 after merging a change here to re-stamp every consuming repo's pin — it's
 idempotent, so it's the way a blueprint change propagates.
 
-This repo must stay **public** for the reusable workflow to be callable from
-repos under other owners (e.g. `beauzone/*`); private reusable workflows only
-work within a single owner.
+This repo is currently **public** because the reusable workflow is called from
+repos under a different owner (`beauzone/*`); private reusable workflows only
+work within a single owner. Per the design doc (§14), it becomes private with
+organization-wide workflow access once the consuming repos live under
+`Beau-s-Dev-Org`.
 
 ## Consuming repos
 
