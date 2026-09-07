@@ -203,7 +203,7 @@ Nothing MaC v0 depends on changes: `ocr-review.yml` is untouched and stays at it
 Sequenced as PRs, each hold-for-Beau, each small enough to review in one sitting:
 
 1. **Prune.** Delete the retired material, move machine bootstrap to `beau-dev-machine`, fix the README contradictions (`@main` vs SHA), close the six duplicate test issues. No behavior change to `ocr-review.yml`.
-2. **Rules and skeleton.** `AGENTS.md`, `CODEOWNERS`, `project.yaml` profiles, `docs/` layout with schemas for DRs and specs, issue and PR templates, `HANDOFF.md`, `REUSE.toml`. Mark the repo as a template; flip to private with org-wide workflow access once the new MaC repos exist under `Beau-s-Dev-Org`.
+2. **Rules and skeleton.** `AGENTS.md`, `CODEOWNERS`, `project.yaml` profiles, `docs/` layout with schemas for DRs and specs, issue and PR templates, `HANDOFF.md`, `REUSE.toml`. Mark the repo as a template. The private flip is *not* part of this PR; it waits until no `beauzone/*` repo calls the workflow (§14, decision 3).
 3. **Gates, first half.** `gates.yml` with `decisions`, `stale-refs`, `pins`, `hygiene`, `docs`, each with its negative test in `evals/`.
 4. **Gates, second half.** `derived`, `conformance`, `boundaries`, `negative`, `security`. These need a reference implementation to test against, so they land alongside PR 6.
 5. **Release.** `release.yml`, `models.yaml`, changelog generation.
@@ -229,6 +229,6 @@ Replaces the Conductor. When a spec's status reaches *Contract frozen*, the `wri
 
 1. **Machine bootstrap**: split into a separate `beau-dev-machine` repo (Brewfile, VS Code profile, local tooling). The blueprint carries project setup only.
 2. **Conductor**: retired outright; replaced by `plan-issues` (§13).
-3. **Ownership and visibility**: new MaC repos (monorepo, contract, registry) are created under `Beau-s-Dev-Org`. The blueprint becomes private with organization-wide reusable-workflow access. v0 repos under `beauzone` keep their SHA-pinned stubs; their re-stamp path is accepted as broken since v0 is frozen. `mac-contract` and the plugin mirror are public for outside consumers and do not depend on the blueprint.
+3. **Ownership and visibility**: new MaC repos (monorepo, contract, registry) are created under `Beau-s-Dev-Org`. The blueprint becomes private with organization-wide reusable-workflow access **only after the v0 repos under `beauzone` no longer call it** — GitHub checks the called repository's visibility and owner at run time, so a SHA pin does not keep a cross-owner private workflow resolvable, and flipping early would fail every v0 repo's OCR review on its next PR (raised by the Codex review on PR #65). Until then the blueprint stays public. Two ways to reach the flip: archive the v0 repos at cutover (the default), or transfer them into `Beau-s-Dev-Org` earlier if their review pipeline needs to keep working past that point. `mac-contract` and the plugin mirror are public for outside consumers and do not depend on the blueprint.
 4. **Language defaults**: Python and TypeScript, so every gate is proven for both toolchains and the reference example's client is in a second language to demonstrate contract neutrality.
 5. **Project profiles**: `project.yaml` with `tracker` and `profile` (§12).
