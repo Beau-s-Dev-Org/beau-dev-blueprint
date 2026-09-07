@@ -3,7 +3,8 @@
 # This is the shared, single-source-of-truth OCR PR-review workflow for all of
 # Beau's repos. Each consuming repo carries only a thin caller stub (see
 # templates/ocr-review-caller.yml in this repo) that declares the triggers and
-# does `uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@main`,
+# does `uses: Beau-s-Dev-Org/beau-dev-blueprint/.github/workflows/ocr-review.yml@<SHA>`,
+# pinned to a commit SHA and stamped/refreshed via scripts/rollout-ocr.sh (never `@main`),
 # passing model config as inputs and the LLM credentials as explicit secrets.
 # All review logic, the pinned OCR action version, and the LLM fallback chain
 # live HERE — edit once, every repo picks it up.
