@@ -276,6 +276,125 @@ jobs:
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
+      - name: Fail if the review only partially ran
+        # OCR exits 0 when it reviewed SOME of the files it selected. Its own
+        # result then reads:
+        #
+        #   "status": "partial",
+        #   "message": "Review partially complete: 0 finding(s); 2 of 5 selected item(s) failed.",
+        #   "manifest": { "terminal_state": "partial",
+        #                 "coverage": { "failed": [ { "path": ..., "classification": "timeout" } ] } }
+        #
+        # ...and every surface above it stays green: this check, `gh pr checks`,
+        # the PR's merge state. "0 findings" then means "we did not look",
+        # which is indistinguishable from "we looked and found nothing" unless
+        # someone opens this log and reads the JSON.
+        #
+        # Not hypothetical. On marketing-as-code#348 (2026-09-18, run
+        # 35397919573) the two files carrying all the logic under review both
+        # exceeded the per-file time limit and were never read; the three that
+        # completed were a test module, a settings JSON and one script. The
+        # check went green and the PR was a click from merging on a review that
+        # had not happened. Note summary.files_reviewed said 5 — it counts
+        # SELECTED items, not reviewed ones, so it cannot be used here.
+        #
+        # Every consuming repo's merge policy says a review that never ran is
+        # not approval. This step is what makes that enforceable from the PR
+        # page instead of from a log.
+        #
+        # Runs whenever an attempt SUCCEEDED — the all-failed case belongs to
+        # the next step, where /tmp/ocr-result.json is absent or stale.
+        if: >-
+          steps.ocr-primary.outcome == 'success'
+          || steps.ocr-fallback1.outcome == 'success'
+          || steps.ocr-fallback2.outcome == 'success'
+        shell: bash
+        env:
+          # BEA-327: never interpolate a context value into a run body.
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          RESULT=/tmp/ocr-result.json
+
+          # Unknown is not the same as verified, so an unreadable result is
+          # reported loudly rather than passed over — but it does not fail the
+          # job. A result whose shape changed upstream would otherwise turn
+          # every PR in every consuming repo red at once, and the first fix
+          # anyone reached for would be deleting this step.
+          if [ ! -s "$RESULT" ] || ! jq -e . "$RESULT" >/dev/null 2>&1; then
+            echo "::warning::OCR reported success but $RESULT is missing or not valid JSON, so review completeness could not be verified. Treat this check as 'unknown', not 'passed'."
+            echo "⚠️ OCR completeness could not be verified (no readable result JSON)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if ! jq -e '.manifest.coverage' "$RESULT" >/dev/null 2>&1; then
+            SCHEMA=$(jq -r '.manifest.schema_version // "absent"' "$RESULT")
+            echo "::warning::OCR result carries no .manifest.coverage (schema_version: ${SCHEMA}); completeness could not be verified. This step expects ocr.run-manifest/v1."
+            echo "⚠️ OCR completeness could not be verified (unexpected result schema: ${SCHEMA})." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Flag on the FACTS (a non-empty failed list) and on either literal
+          # "partial", rather than on "not one of the success values" — the
+          # success vocabulary is not ours to enumerate, and guessing it wrong
+          # in the permissive direction restores the silence this step removes.
+          N_FAILED=$(jq '.manifest.coverage.failed | length' "$RESULT")
+          TERMINAL=$(jq -r '.manifest.terminal_state // ""' "$RESULT")
+          STATUS=$(jq -r '.status // ""' "$RESULT")
+
+          if [ "${N_FAILED:-0}" -eq 0 ] && [ "$TERMINAL" != "partial" ] && [ "$STATUS" != "partial" ]; then
+            N_DONE=$(jq '.manifest.coverage.completed | length' "$RESULT")
+            echo "OCR reviewed every item it selected (${N_DONE} completed)."
+            exit 0
+          fi
+
+          # jq builds the lines: a path can contain spaces, and a shell loop
+          # over word-split output would split them.
+          UNREVIEWED=$(jq -r '.manifest.coverage.failed[]
+            | "- `\(.path)` — \(.classification // "unknown")\(if .reason then ": " + .reason else "" end)"' "$RESULT")
+          N_SELECTED=$(jq '.manifest.coverage.selected | length' "$RESULT")
+          N_DONE=$(jq '.manifest.coverage.completed | length' "$RESULT")
+
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::OCR did not review ${line#- }"
+          done <<< "$UNREVIEWED"
+
+          {
+            echo "## ❌ OpenCodeReview did not finish"
+            echo
+            echo "Reviewed **${N_DONE} of ${N_SELECTED}** selected files. The rest were never read, so"
+            echo "a finding count from this run says nothing about them."
+            echo
+            echo "$UNREVIEWED"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Put it on the PR too: the point is that this is visible without
+          # opening a run log.
+          if [ -n "${PR_NUMBER:-}" ]; then
+            {
+              echo "## ❌ OpenCodeReview did not finish"
+              echo
+              echo "This review covered **${N_DONE} of ${N_SELECTED}** selected files. The following were"
+              echo "selected and never reviewed, so **no finding count from this run applies to them**:"
+              echo
+              echo "$UNREVIEWED"
+              echo
+              echo "A review that did not run is not an approval. Re-run it by commenting"
+              echo "\`/open-code-review\`, or reduce the size of the files above — \`timeout\`"
+              echo "means the file exceeded the per-file limit and will keep doing so."
+              echo
+              echo "<sub>[Run log](${RUN_URL})</sub>"
+            } > /tmp/ocr-incomplete.md
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/ocr-incomplete.md \
+              || echo "::warning::could not post the incomplete-review comment to PR #${PR_NUMBER}"
+          fi
+
+          echo "::error::OCR reviewed ${N_DONE} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."
+          exit 1
+
       - name: Fail if all review attempts failed
         # The attempt steps are continue-on-error, so this step is the only
         # thing that turns the job red. A skipped fallback (not configured)

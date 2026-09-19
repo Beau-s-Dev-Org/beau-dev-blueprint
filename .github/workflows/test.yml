@@ -1,0 +1,50 @@
+# Runs this repo's own tests.
+#
+# The blueprint had no test CI: its only workflow reviewed its pull requests
+# with OCR. That was tolerable while it shipped templates and docs, and stopped
+# being tolerable once .github/workflows/ocr-review.yml grew logic that decides
+# whether a review counts as approval in every consuming repo. A guard verified
+# once by hand is the shape of dormant guard the guard itself exists to catch.
+#
+# Deliberately path-filtered: this repo is mostly templates and prose, and a
+# gate that runs on every README edit is a gate people learn to ignore.
+name: Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ocr-review.yml'
+      - '.github/workflows/test.yml'
+      - 'scripts/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ocr-review.yml'
+      - '.github/workflows/test.yml'
+      - 'scripts/**'
+  workflow_dispatch:
+
+# One run per ref; a superseded push has nothing left to prove.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scripts:
+    name: Script tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+
+      - name: OCR completeness gate
+        run: bash scripts/test-ocr-completeness.sh
