@@ -330,33 +330,67 @@ jobs:
             exit 0
           fi
 
-          if ! jq -e '.manifest.coverage' "$RESULT" >/dev/null 2>&1; then
+          # Require the shape, not just a truthy .coverage. A v2 result with
+          # "coverage": {} passes an existence check, and `.failed | length`
+          # on an absent field is 0 — so an upstream shape change would sail
+          # through the success branch as "0 completed" and hand back the green
+          # approval this step exists to withhold.
+          if ! jq -e '.manifest.coverage
+                      | (.selected | type == "array")
+                        and (.completed | type == "array")
+                        and (.failed | type == "array")' "$RESULT" >/dev/null 2>&1; then
             SCHEMA=$(jq -r '.manifest.schema_version // "absent"' "$RESULT")
-            echo "::warning::OCR result carries no .manifest.coverage (schema_version: ${SCHEMA}); completeness could not be verified. This step expects ocr.run-manifest/v1."
+            echo "::warning::OCR result has no usable .manifest.coverage arrays (schema_version: ${SCHEMA}); completeness could not be verified. This step expects ocr.run-manifest/v1."
             echo "⚠️ OCR completeness could not be verified (unexpected result schema: ${SCHEMA})." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Flag on the FACTS (a non-empty failed list) and on either literal
-          # "partial", rather than on "not one of the success values" — the
-          # success vocabulary is not ours to enumerate, and guessing it wrong
-          # in the permissive direction restores the silence this step removes.
-          N_FAILED=$(jq '.manifest.coverage.failed | length' "$RESULT")
+          # Compare the coverage arithmetic against the SELECTED set rather
+          # than matching status strings. Every selected item that is not
+          # accounted for — completed, reused, or waived — was not reviewed,
+          # whether it landed in `failed` or simply went missing. That covers
+          # three states one rule at a time would have needed separate cases
+          # for: a partial run, a "skipped" run that still selected files, and
+          # a manifest that quietly drops items. Identity is item_id where
+          # present, path otherwise.
+          jq -r '.manifest.coverage as $c
+                 | ($c.completed + ($c.reused // []) + ($c.waived // []))
+                 | map(.item_id // .path) | .[]' "$RESULT" | sort -u > /tmp/ocr-covered.txt
+          jq -r '.manifest.coverage.selected | map(.item_id // .path) | .[]' "$RESULT" \
+            | sort -u > /tmp/ocr-selected.txt
+          N_SELECTED=$(grep -c . /tmp/ocr-selected.txt || true)
+          N_COVERED=$(comm -12 /tmp/ocr-selected.txt /tmp/ocr-covered.txt | grep -c . || true)
+
           TERMINAL=$(jq -r '.manifest.terminal_state // ""' "$RESULT")
           STATUS=$(jq -r '.status // ""' "$RESULT")
 
-          if [ "${N_FAILED:-0}" -eq 0 ] && [ "$TERMINAL" != "partial" ] && [ "$STATUS" != "partial" ]; then
-            N_DONE=$(jq '.manifest.coverage.completed | length' "$RESULT")
-            echo "OCR reviewed every item it selected (${N_DONE} completed)."
+          # Nothing selected means there was nothing to review — a Markdown-only
+          # diff, say. That is a true "nothing to approve", not silence, and it
+          # says so rather than claiming it reviewed everything.
+          if [ "${N_SELECTED:-0}" -eq 0 ]; then
+            echo "OCR selected no files for review (status: ${STATUS:-?}); there is nothing for this gate to withhold."
+            echo "ℹ️ OCR selected no files for review — nothing to approve or withhold." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # jq builds the lines: a path can contain spaces, and a shell loop
-          # over word-split output would split them.
-          UNREVIEWED=$(jq -r '.manifest.coverage.failed[]
+          if [ "${N_COVERED:-0}" -eq "${N_SELECTED:-0}" ] \
+             && [ "$TERMINAL" != "partial" ] && [ "$STATUS" != "partial" ]; then
+            echo "OCR reviewed every item it selected (${N_COVERED} of ${N_SELECTED})."
+            exit 0
+          fi
+
+          # Two kinds of gap, reported separately because they need different
+          # things from the reader: a failed item comes with a reason, an
+          # unaccounted one does not exist in any bucket at all.
+          FAILED_LINES=$(jq -r '.manifest.coverage.failed[]?
             | "- `\(.path)` — \(.classification // "unknown")\(if .reason then ": " + .reason else "" end)"' "$RESULT")
-          N_SELECTED=$(jq '.manifest.coverage.selected | length' "$RESULT")
-          N_DONE=$(jq '.manifest.coverage.completed | length' "$RESULT")
+          UNACCOUNTED=$(comm -23 /tmp/ocr-selected.txt /tmp/ocr-covered.txt \
+            | while IFS= read -r id; do
+                [ -n "$id" ] || continue
+                jq -r --arg id "$id" '.manifest.coverage.failed[]? | select((.item_id // .path) == $id) | .path' "$RESULT" \
+                  | grep -q . || echo "- \`$(jq -r --arg id "$id" '.manifest.coverage.selected[] | select((.item_id // .path) == $id) | .path' "$RESULT")\` — not reported in any coverage bucket"
+              done)
+          UNREVIEWED=$(printf '%s\n%s' "$FAILED_LINES" "$UNACCOUNTED" | grep -v '^$' || true)
 
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::error::OCR did not review ${line#- }"
@@ -365,8 +399,8 @@ jobs:
           {
             echo "## ❌ OpenCodeReview did not finish"
             echo
-            echo "Reviewed **${N_DONE} of ${N_SELECTED}** selected files. The rest were never read, so"
-            echo "a finding count from this run says nothing about them."
+            echo "Covered **${N_COVERED} of ${N_SELECTED}** selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?})."
+            echo "The files below were never read, so no finding count from this run applies to them."
             echo
             echo "$UNREVIEWED"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -377,7 +411,7 @@ jobs:
             {
               echo "## ❌ OpenCodeReview did not finish"
               echo
-              echo "This review covered **${N_DONE} of ${N_SELECTED}** selected files. The following were"
+              echo "This review covered **${N_COVERED} of ${N_SELECTED}** selected files. The following were"
               echo "selected and never reviewed, so **no finding count from this run applies to them**:"
               echo
               echo "$UNREVIEWED"
@@ -392,7 +426,7 @@ jobs:
               || echo "::warning::could not post the incomplete-review comment to PR #${PR_NUMBER}"
           fi
 
-          echo "::error::OCR reviewed ${N_DONE} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."
+          echo "::error::OCR covered ${N_COVERED} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."
           exit 1
 
       - name: Fail if all review attempts failed

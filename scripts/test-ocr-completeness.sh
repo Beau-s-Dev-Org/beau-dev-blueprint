@@ -59,26 +59,56 @@ $(cat "$WORK/summary.md")"
   fi
 }
 
-COVERAGE='"selected":[{"path":"a.py"},{"path":"b.py"},{"path":"c.py"}],"reused":[],"waived":[]'
-PARTIAL='{"status":"partial","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"partial","coverage":{'"$COVERAGE"',"completed":[{"path":"a.py"}],"failed":[{"path":"b.py","classification":"timeout","reason":"file review exceeded its time limit"},{"path":"c.py","classification":"error"}]}}}'
-COMPLETE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{'"$COVERAGE"',"completed":[{"path":"a.py"},{"path":"b.py"},{"path":"c.py"}],"failed":[]}}}'
-SPACES='{"status":"partial","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"partial","coverage":{'"$COVERAGE"',"completed":[],"failed":[{"path":"docs/my notes.md","classification":"timeout"}]}}}'
-# terminal_state says partial while the failed list is empty: either signal alone must fire.
-TERMINAL_ONLY='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"partial","coverage":{'"$COVERAGE"',"completed":[{"path":"a.py"}],"failed":[]}}}'
-FAILED_ONLY='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{'"$COVERAGE"',"completed":[{"path":"a.py"}],"failed":[{"path":"b.py","classification":"timeout"}]}}}'
+SEL3='"selected":[{"item_id":"1","path":"a.py"},{"item_id":"2","path":"b.py"},{"item_id":"3","path":"c.py"}]'
+V1='"schema_version":"ocr.run-manifest/v1"'
+
+mk() {  # status, terminal_state, completed, failed, reused, waived, selected
+  printf '{"status":"%s","manifest":{%s,"terminal_state":"%s","coverage":{%s,"completed":%s,"failed":%s,"reused":%s,"waived":%s}}}' \
+    "$1" "$V1" "$2" "${7:-$SEL3}" "$3" "$4" "$5" "$6"
+}
+ALL3='[{"item_id":"1","path":"a.py"},{"item_id":"2","path":"b.py"},{"item_id":"3","path":"c.py"}]'
+ONE='[{"item_id":"1","path":"a.py"}]'
+FAIL2='[{"item_id":"2","path":"b.py","classification":"timeout","reason":"file review exceeded its time limit"},{"item_id":"3","path":"c.py","classification":"error"}]'
+
+PARTIAL=$(mk partial partial "$ONE" "$FAIL2" '[]' '[]')
+COMPLETE=$(mk success completed "$ALL3" '[]' '[]' '[]')
+TERMINAL_ONLY=$(mk success partial "$ALL3" '[]' '[]' '[]')
+STATUS_ONLY=$(mk partial completed "$ALL3" '[]' '[]' '[]')
+FAILED_ONLY=$(mk success completed "$ONE" "$FAIL2" '[]' '[]')
+# Devin: a "skipped" run that still selected files reviewed nothing.
+SKIPPED_WITH_SEL=$(mk skipped skipped '[]' '[]' '[]' '[]')
+# ...but a run that selected nothing had nothing to review.
+SKIPPED_EMPTY=$(mk skipped skipped '[]' '[]' '[]' '[]' '"selected":[]')
+# reused/waived are covered, not gaps: 1 completed + 1 reused + 1 waived = all 3.
+REUSED_WAIVED=$(mk success completed "$ONE" '[]' '[{"item_id":"2","path":"b.py"}]' '[{"item_id":"3","path":"c.py"}]')
+# ...and when one DID fail, the count must agree with the listed paths.
+MIXED=$(mk partial partial "$ONE" '[{"item_id":"3","path":"c.py","classification":"timeout"}]' '[{"item_id":"2","path":"b.py"}]' '[]')
+# An item in no bucket at all is a gap the failed list cannot describe.
+UNACCOUNTED=$(mk success completed "$ONE" '[]' '[]' '[]')
+SPACES=$(mk partial partial '[]' '[{"item_id":"1","path":"docs/my notes.md","classification":"timeout"}]' '[]' '[]' '"selected":[{"item_id":"1","path":"docs/my notes.md"}]')
 NEW_SCHEMA='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v2"}}'
+# A v2 result that still has a coverage OBJECT must not sneak through.
+V2_EMPTY_COVERAGE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v2","coverage":{}}}'
 
 echo "OCR completeness gate:"
-run_case "a partial review fails the job"          1 "$PARTIAL"       "A partial review is not an approval"
-run_case "  ...and names every unreviewed file"    1 "$PARTIAL"       'OCR did not review `c.py`'
-run_case "  ...and reports the reason"             1 "$PARTIAL"       "file review exceeded its time limit"
-run_case "  ...and says how many were covered"     1 "$PARTIAL"       "1 of 3"
-run_case "a complete review passes"                0 "$COMPLETE"      "reviewed every item it selected"
-run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY" "A partial review is not an approval"
-run_case "a failed item alone is enough"           1 "$FAILED_ONLY"   "A partial review is not an approval"
-run_case "a path with spaces survives"             1 "$SPACES"        'docs/my notes.md'
-run_case "a missing result warns, does not block"  0 NONE             "could not be verified"
-run_case "an unknown schema warns, does not block" 0 "$NEW_SCHEMA"    "ocr.run-manifest/v2"
+run_case "a partial review fails the job"          1 "$PARTIAL"           "A partial review is not an approval"
+run_case "  ...and names every unreviewed file"    1 "$PARTIAL"           'OCR did not review `c.py`'
+run_case "  ...and reports the reason"             1 "$PARTIAL"           "file review exceeded its time limit"
+run_case "  ...and says how much was covered"      1 "$PARTIAL"           "1 of 3"
+run_case "a complete review passes"                0 "$COMPLETE"          "reviewed every item it selected"
+run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY"     "A partial review is not an approval"
+run_case "status alone is enough"                  1 "$STATUS_ONLY"       "A partial review is not an approval"
+run_case "a failed item alone is enough"           1 "$FAILED_ONLY"       "A partial review is not an approval"
+run_case "a path with spaces survives"             1 "$SPACES"            'docs/my notes.md'
+run_case "skipped WITH selected files fails"       1 "$SKIPPED_WITH_SEL"  "A partial review is not an approval"
+run_case "  ...and names them as unaccounted"      1 "$SKIPPED_WITH_SEL"  "not reported in any coverage bucket"
+run_case "selecting nothing is not a failure"      0 "$SKIPPED_EMPTY"     "selected no files for review"
+run_case "reused and waived count as covered"      0 "$REUSED_WAIVED"     "reviewed every item it selected"
+run_case "the count agrees with the listed paths"  1 "$MIXED"             "2 of 3"
+run_case "an item in no bucket is a gap"           1 "$UNACCOUNTED"       "not reported in any coverage bucket"
+run_case "a missing result warns, does not block"  0 NONE                 "could not be verified"
+run_case "an unknown schema warns, does not block" 0 "$NEW_SCHEMA"        "ocr.run-manifest/v2"
+run_case "an empty coverage object cannot pass"    0 "$V2_EMPTY_COVERAGE" "could not be verified"
 
 # The PR comment is a distinct channel from the annotations; check it moved.
 : > "$WORK/gh.log"; printf '%s' "$PARTIAL" > /tmp/ocr-result.json
