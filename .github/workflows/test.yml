@@ -52,6 +52,14 @@ jobs:
           cache: 'pip'
           cache-dependency-path: scripts/requirements.txt
 
+      - name: Require jq
+        run: |
+          command -v jq >/dev/null || {
+            echo "::error::jq is not on PATH; the step under test parses JSON with it."
+            exit 1
+          }
+          jq --version
+
       # Both of this suite's dependencies, declared rather than assumed. The
       # script parses the workflow with PyYAML to extract the step it tests, and
       # the extracted step parses the result JSON with jq — ubuntu-latest ships
@@ -63,15 +71,7 @@ jobs:
       # PyYAML is pinned exactly: an open 6.x range resolves whatever exists at
       # run time, so a bad release breaks CI with no change here.
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check -r scripts/requirements.txt
-
-      - name: Require jq
-        run: |
-          command -v jq >/dev/null || {
-            echo "::error::jq is not on PATH; the step under test parses JSON with it."
-            exit 1
-          }
-          jq --version
+        run: python3 -m pip install --disable-pip-version-check -r scripts/requirements.txt
 
       - name: OCR completeness gate
         run: bash scripts/test-ocr-completeness.sh

@@ -53,10 +53,22 @@ def run(doc, env=None, raw=None):
     (WORK / "summary.md").write_text("")
     (WORK / "result.json").write_text(raw if raw is not None else json.dumps(doc))
     # The same wrapper flags Actions applies to a `shell: bash` step.
+    # A None override REMOVES the variable. Without this the audit could not
+    # express an unset GITHUB_STEP_SUMMARY — the very state its own docstring
+    # credits it with finding, and which neither suite could otherwise reach.
+    merged = {**ENV, **(env or {})}
+    merged = {k: v for k, v in merged.items() if v is not None}
     r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(STEP)],
-                       capture_output=True, text=True, env={**ENV, **(env or {})})
+                       capture_output=True, text=True, env=merged)
     out = r.stdout + r.stderr + (WORK / "summary.md").read_text()
-    if r.returncode == 1: verdict = "FAIL (incomplete)"
+    # A crash is its own state, not a verdict. Without this an unbound-variable
+    # abort exits 1 and reads as an ordinary "incomplete" — so deleting the
+    # GITHUB_STEP_SUMMARY guard changed no row, and the audit credited with
+    # finding that guard could not have found it.
+    if ("unbound variable" in out or "command not found" in out
+            or "syntax error" in out or r.returncode > 1):
+        verdict = f"?? crashed rc={r.returncode}"
+    elif r.returncode == 1: verdict = "FAIL (incomplete)"
     elif "could not be verified" in out: verdict = "abstain (warn)"
     elif "selected no files" in out: verdict = "pass (nothing selected)"
     elif "reviewed every item" in out: verdict = "pass (complete)"
@@ -116,16 +128,23 @@ CASES = [
  ("newline forging tagged ids",            dict(doc=cov(sel=["a","b","a\npath:b"], done=["a","b"]))),
  # --- environment ---
  ("no PR number (push event)",             dict(doc=cov(sel=["a","b"], done=["a"]), env={"PR_NUMBER": ""})),
+ ("no step summary file (complete run)",   dict(doc=cov(sel=["a"], done=["a"]), env={"GITHUB_STEP_SUMMARY": None})),
+ ("no step summary file (incomplete run)", dict(doc=cov(sel=["a","b"], done=["a"]), env={"GITHUB_STEP_SUMMARY": None})),
  ("gh pr comment fails",                   dict(doc=cov(sel=["a","b"], done=["a"]), env={"PATH": "/nonexistent:" + os.environ["PATH"]})),
 ]
 print(f"  {'case':42} {'verdict'}")
 print("  " + "-" * 70)
 unclassified = []
 for name, kw in CASES:
-    v, _ = run(kw.get("doc"), kw.get("env"), kw.get("raw"))
+    v, out = run(kw.get("doc"), kw.get("env"), kw.get("raw"))
     print(f"  {name:42} {v}")
     if v.startswith("??"):
         unclassified.append(name)
+        # The product of this script is the table; a row nobody can explain is
+        # the finding, so hand over the evidence already captured rather than
+        # making the reader reconstruct the invocation.
+        for line in out.splitlines():
+            print(f"        | {line}")
 shutil.rmtree(WORK, ignore_errors=True)
 if unclassified:
     print()

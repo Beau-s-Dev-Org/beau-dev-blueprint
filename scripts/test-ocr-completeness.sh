@@ -33,18 +33,36 @@ PY
 
 # gh must not actually post from a test run.
 mkdir -p "$WORK/bin"
+# The fake gh RUNS the --jq filter the step actually passed, against a canned
+# comments payload holding one bot comment carrying the marker and one human
+# comment carrying it too. So the bot-scoping is tested for real: a filter
+# without the .user.type check selects the human comment (id 999) and the
+# assertion below catches it.
+cat > "$WORK/comments.json" <<'CJEOF'
+[[{"id":4242,"user":{"type":"Bot"},"body":"<!-- ocr-completeness-gate -->\n## did not finish"},
+  {"id":999,"user":{"type":"User"},"body":"quoting the bot: <!-- ocr-completeness-gate -->"}]]
+CJEOF
 cat > "$WORK/bin/gh" <<GHEOF
-#!/bin/sh
+#!/bin/bash
 echo "[gh] \$*" >> "$WORK/gh.log"
-# When OCR_FAKE_PRIOR_COMMENT is set, the marker lookup finds an existing
-# comment, so the clear/update path is exercised instead of short-circuiting.
-case "\$*" in
-  *issues/*/comments*--slurp*)
-    [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ] && echo 4242 ;;
-  *issues/*/comments*--paginate*)
-    # no --slurp: --jq runs per page, so a marker on two pages yields two ids
-    [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ] && printf '101\\n4242\\n' ;;
-esac
+if [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ]; then
+  case "\$*" in
+    *issues/*/comments*)
+      filter=""
+      prev=""
+      for a in "\$@"; do
+        [ "\$prev" = "--jq" ] && filter="\$a"
+        prev="\$a"
+      done
+      if [ -n "\$filter" ]; then
+        case "\$*" in
+          *--slurp*) jq -r "\$filter" "$WORK/comments.json" ;;
+          *) jq -r "\$filter" <<< "\$(jq -c '.[0]' "$WORK/comments.json")" ;;
+        esac
+      fi
+      ;;
+  esac
+fi
 exit 0
 GHEOF
 chmod +x "$WORK/bin/gh"
@@ -52,7 +70,7 @@ chmod +x "$WORK/bin/gh"
 PASS=0; FAIL=0
 run_case() {  # name, expected_exit, result-json-or-NONE, expected substring
   local name="$1" want="$2" json="$3" needle="$4"
-  : > "$WORK/summary.md"; : > "$WORK/gh.log"
+  : > "$WORK/summary.md"; : > "$WORK/gh.log"; : > "$WORK/comment.md"
   # Hermetic: the step honours OCR_RESULT_FILE, so fixtures live in this run's
   # own temp dir. A fixed /tmp path is racy between concurrent runs and, on a
   # shared host, `rm -f` cannot clear another user's pre-planted symlink — the
@@ -134,6 +152,7 @@ REAL_SHAPE='{"status":"complete","manifest":{"schema_version":"ocr.run-manifest/
 MULTILINE_REASON='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a.py"}],"completed":[],"failed":[{"path":"a.py","classification":"timeout","reason":"boom\n::error::FORGED\n::add-mask::secret"}],"reused":[],"waived":[]}}}'
 # A backtick in a path would close the markdown code span early.
 NEWLINE_STATUS='{"status":"success\n::error::FORGED","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+SPACED_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":" a.py "}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 MARKDOWN_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a`*b*.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 DOUBLE_TICK_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a``b.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 BACKTICK_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a`b.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
@@ -168,6 +187,10 @@ V1_NEWLINE_ALIAS='{"status":"success","manifest":{"schema_version":"ocr.run-mani
 PARTIAL_BAD_COVERAGE='{"status":"partial","manifest":{"schema_version":"ocr.run-manifest/v1","coverage":{}}}'
 PARTIAL_BAD_SCHEMA='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v9","terminal_state":"partial"}}'
 PARTIAL_NOT_JSON='not json at all'
+# Valid JSON whose root or .manifest is the wrong type: a bare .status lookup
+# errors, and under Actions' -e that aborted the job instead of abstaining.
+SCALAR_MANIFEST='{"status":"success","manifest":"bad"}'
+ARRAY_ROOT='[1,2,3]'
 V1_ID_COLLISION='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"item_id":"a.py","path":"first.py"},{"item_id":"","path":"a.py"}],"completed":[{"item_id":"a.py","path":"first.py"}],"failed":[],"reused":[],"waived":[]}}}'
 V1_REUSED_STRING='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a.py"}],"completed":[{"path":"a.py"}],"failed":[],"reused":["b.py"],"waived":[]}}}'
 # A v2 result that still has a coverage OBJECT must not sneak through.
@@ -180,13 +203,17 @@ run_case "  ...and reports the reason"             1 "$PARTIAL"           "file 
 run_case "  ...and says how much was covered"      1 "$PARTIAL"           "1 of 3"
 run_case "a complete review passes"                0 "$COMPLETE"          "reviewed every item it selected"
 run_case "the shape OCR actually emits passes"     0 "$REAL_SHAPE"        "reviewed every item it selected"
-run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED' 
+run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED'
 
-run_case "a backtick keeps the path verbatim"      1 "$BACKTICK_PATH"     '``a`b.py``' 
+run_case "a backtick keeps the path verbatim"      1 "$BACKTICK_PATH"     '``a`b.py``'
 run_case "  ...with markdown syntax beside it"      1 "$MARKDOWN_PATH"     '``a`*b*.py``'
 run_case "  ...and a doubled backtick widens it"   1 "$DOUBLE_TICK_PATH"  '```a``b.py```'
+run_case "  ...and surrounding spaces survive"     1 "$SPACED_PATH"       '`  a.py  `'
 run_case "a newline in status stays one line"      1 "$NEWLINE_STATUS"    'success\n::error::FORGED'
 run_case "an empty result file abstains"           0 ""                   "could not be verified"
+run_case "an unparseable result abstains"          0 "$PARTIAL_NOT_JSON"  "could not be verified"
+run_case "a scalar manifest abstains"              0 "$SCALAR_MANIFEST"   "could not be verified"
+run_case "an array root abstains"                  0 "$ARRAY_ROOT"        "could not be verified"
 run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY"     "A partial review is not an approval"
 run_case "status alone is enough"                  1 "$STATUS_ONLY"       "A partial review is not an approval"
 run_case "a failed item alone is enough"           1 "$FAILED_ONLY"       "A partial review is not an approval"
@@ -223,20 +250,21 @@ run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR di
 
 # A passing rerun must clear a stale "did not finish" rather than leave the PR
 # claiming files were unreviewed after a run that covered them.
-: > "$WORK/gh.log"; printf '%s' "$COMPLETE" > "$WORK/result.json"
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$COMPLETE" > "$WORK/result.json"
 PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
   OCR_FAKE_PRIOR_COMMENT=1 OCR_RESULT_FILE="$WORK/result.json" \
   OCR_COMMENT_FILE="$WORK/comment.md" GITHUB_STEP_SUMMARY="$WORK/summary.md" \
   bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
 if grep -q "PATCH" "$WORK/gh.log" && grep -q "OpenCodeReview completeness" "$WORK/comment.md" 2>/dev/null \
-   && grep -q "issues/comments/4242 " "$WORK/gh.log"; then
+   && grep -q "issues/comments/4242 " "$WORK/gh.log" \
+   && ! grep -q "issues/comments/999 " "$WORK/gh.log"; then
   echo "  ok    a passing rerun clears a stale failure"; PASS=$((PASS+1))
 else
   echo "  FAIL  a passing rerun left the stale failure comment"; FAIL=$((FAIL+1))
 fi
 
 # ...and with no prior comment it must not invent one.
-: > "$WORK/gh.log"; printf '%s' "$COMPLETE" > "$WORK/result.json"
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$COMPLETE" > "$WORK/result.json"
 PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
   OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
   GITHUB_STEP_SUMMARY="$WORK/summary.md" \
@@ -248,7 +276,7 @@ else
 fi
 
 # The PR comment is a distinct channel from the annotations; check it moved.
-: > "$WORK/gh.log"; printf '%s' "$PARTIAL" > "$WORK/result.json"
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
 PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
   OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
   GITHUB_STEP_SUMMARY="$WORK/summary.md" \

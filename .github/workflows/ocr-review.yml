@@ -351,8 +351,19 @@ jobs:
             # line into several. The forged-workflow-command half of that is
             # blocked by every line carrying its own prefix, but the format
             # damage and the misleading extra annotations are real.
-            STATUS=$(jq -r '.status // "" | @json | .[1:-1]' "$RESULT")
-            TERMINAL=$(jq -r '.manifest.terminal_state // "" | @json | .[1:-1]' "$RESULT")
+            # Type-guarded and `|| true`. A valid-JSON result whose root or
+            # .manifest is a scalar or array makes a bare .status/.manifest
+            # lookup error, and Actions runs this step with -e, so the command
+            # substitution aborted the whole job — turning the deliberately
+            # non-blocking "we cannot tell" into a red check everywhere. rc=5,
+            # verified.
+            STATUS=$(jq -r 'if type == "object" then (.status? // "") else "" end
+                            | if type == "string" then . else "" end
+                            | @json | .[1:-1]' "$RESULT" 2>/dev/null || true)
+            TERMINAL=$(jq -r 'if (type == "object") and ((.manifest? | type) == "object")
+                              then (.manifest.terminal_state? // "") else "" end
+                              | if type == "string" then . else "" end
+                              | @json | .[1:-1]' "$RESULT" 2>/dev/null || true)
           fi
           DECLARED_PARTIAL=no
           [ "$STATUS" = "partial" ] && DECLARED_PARTIAL=yes
@@ -379,8 +390,16 @@ jobs:
             # went to an endpoint containing both, failing with only a warning
             # and leaving the stale notice up. Slurping gives one array across
             # all pages, so `last` means the newest overall. Verified.
+            # Bot-authored only. Anyone can post a comment containing the
+            # marker; the PATCH would then target a comment this token did not
+            # write, fail, and — because a non-empty PREV skips the
+            # `gh pr comment` fallback — an incomplete review would get no PR
+            # notice at all.
             gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --slurp \
-              --jq "(add // []) | map(select(.body | contains(\"$GATE_MARKER\"))) | last | .id // empty" \
+              --jq "(add // [])
+                    | map(select((.user.type == \"Bot\")
+                                 and (.body | contains(\"$GATE_MARKER\"))))
+                    | last | .id // empty" \
               2>/dev/null || true
           }
 
@@ -421,7 +440,9 @@ jobs:
           [ -s "$RESULT" ] || abstain "the result file is missing or empty"
           jq -e . "$RESULT" >/dev/null 2>&1 || abstain "the result is not valid JSON"
 
-          SCHEMA=$(jq -r '.manifest.schema_version // "absent"' "$RESULT")
+          SCHEMA=$(jq -r 'if (type == "object") and ((.manifest? | type) == "object")
+                          then (.manifest.schema_version? // "absent") else "absent" end
+                          | if type == "string" then . else "absent" end' "$RESULT" 2>/dev/null || echo absent)
           [ "$SCHEMA" = "ocr.run-manifest/v1" ] \
             || abstain "it declares schema_version ${SCHEMA} and this step understands ocr.run-manifest/v1 only"
 
@@ -490,11 +511,11 @@ jobs:
             | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
             | ([$c.failed[] | '"$ID"'] | unique) as $failed
             | ( [ $c.failed[]
-                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^`") or test("`$") then " " + . + " " else . end) + $f) — \(.classification // "unknown" | @json | .[1:-1])"
+                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — \(.classification // "unknown" | @json | .[1:-1])"
                     + (if .reason then ": " + (.reason | @json | .[1:-1]) else "" end) ]
               + [ $c.selected[]
                   | select(('"$ID"' | IN($cov[]) | not) and ('"$ID"' | IN($failed[]) | not))
-                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^`") or test("`$") then " " + . + " " else . end) + $f) — not reported in any coverage bucket" ] )
+                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — not reported in any coverage bucket" ] )
             | .[]' "$RESULT" || true)
           [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
 
