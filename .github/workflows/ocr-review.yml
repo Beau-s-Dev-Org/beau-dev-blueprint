@@ -105,6 +105,16 @@ jobs:
     # attempts (3 × 20) plus overhead, guaranteeing the final fail-gate step
     # still runs instead of being cancelled by the job timeout.
     timeout-minutes: 65
+    # Declared here rather than inherited. A reusable workflow with no
+    # permissions block takes the caller's, so what this job can do depended on
+    # every consuming repo's stub and on repository defaults — under a
+    # restrictive default the incomplete-review comment below would silently
+    # degrade to a ::warning::, which is the failure mode this whole file is
+    # about. pull-requests: write is what `gh pr comment` needs; nothing here
+    # writes contents or touches issues.
+    permissions:
+      contents: read
+      pull-requests: write
     # The secrets context is NOT available in step-level `if:` conditions
     # (only github/needs/strategy/matrix/job/runner/env/vars/steps/inputs are),
     # so "is this fallback configured?" is computed here in job env — where
@@ -317,7 +327,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
-          RESULT=/tmp/ocr-result.json
+          # Overridable so the test harness can run hermetically; unchanged in
+          # Actions, where nothing sets it.
+          RESULT="${OCR_RESULT_FILE:-/tmp/ocr-result.json}"
           # Actions always sets this; the default exists so that if it ever is
           # not set, `set -u` does not abort the incomplete path halfway and
           # take the PR comment down with it. Found by enumerating the gate's
@@ -334,8 +346,13 @@ jobs:
           STATUS=""
           TERMINAL=""
           if [ -s "$RESULT" ] && jq -e . "$RESULT" >/dev/null 2>&1; then
-            STATUS=$(jq -r '.status // ""' "$RESULT")
-            TERMINAL=$(jq -r '.manifest.terminal_state // ""' "$RESULT")
+            # @json-escaped: these are interpolated into ::error:: annotations
+            # and into the PR comment, and a newline in either would split one
+            # line into several. The forged-workflow-command half of that is
+            # blocked by every line carrying its own prefix, but the format
+            # damage and the misleading extra annotations are real.
+            STATUS=$(jq -r '.status // "" | @json | .[1:-1]' "$RESULT")
+            TERMINAL=$(jq -r '.manifest.terminal_state // "" | @json | .[1:-1]' "$RESULT")
           fi
           DECLARED_PARTIAL=no
           [ "$STATUS" = "partial" ] && DECLARED_PARTIAL=yes
@@ -400,7 +417,7 @@ jobs:
           # path contains stops being a question. The counts come back as two
           # integers and the report as one line per entry, with the path
           # @json-escaped so an exotic name cannot break the formatting either.
-          COUNTS=$(jq -r --argjson _ 0 '
+          COUNTS=$(jq -r '
             .manifest.coverage as $c
             | ([$c.selected[] | '"$ID"'] | unique) as $sel
             | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
@@ -434,11 +451,11 @@ jobs:
             | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
             | ([$c.failed[] | '"$ID"'] | unique) as $failed
             | ( [ $c.failed[]
-                  | "- `\(.path // "?" | @json | .[1:-1])` — \(.classification // "unknown")"
-                    + (if .reason then ": " + .reason else "" end) ]
+                  | "- `\(.path // "?" | @json | .[1:-1] | gsub("`"; "\u0060\u200b"))` — \(.classification // "unknown" | @json | .[1:-1])"
+                    + (if .reason then ": " + (.reason | @json | .[1:-1]) else "" end) ]
               + [ $c.selected[]
                   | select(('"$ID"' | IN($cov[]) | not) and ('"$ID"' | IN($failed[]) | not))
-                  | "- `\(.path // "?" | @json | .[1:-1])` — not reported in any coverage bucket" ] )
+                  | "- `\(.path // "?" | @json | .[1:-1] | gsub("`"; "\u0060\u200b"))` — not reported in any coverage bucket" ] )
             | .[]' "$RESULT" || true)
           [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
 
@@ -457,6 +474,7 @@ jobs:
 
           if [ -n "${PR_NUMBER:-}" ]; then
             {
+              echo "<!-- ocr-completeness-gate -->"
               echo "## ❌ OpenCodeReview did not finish"
               echo
               echo "This review covered **${N_COVERED} of ${N_SELECTED}** selected files. The following were"
@@ -469,9 +487,22 @@ jobs:
               echo "means the file exceeded the per-file limit and will keep doing so."
               echo
               echo "<sub>[Run log](${RUN_URL})</sub>"
-            } > /tmp/ocr-incomplete.md
-            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/ocr-incomplete.md \
-              || echo "::warning::could not post the incomplete-review comment to PR #${PR_NUMBER}"
+            } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+            # Update in place. The comment tells the reader to re-run, so without
+            # a marker every retry stacked another "did not finish" comment on
+            # the PR — the same sticky pattern the OCR action uses for its own
+            # summary.
+            PREV=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+                     --jq 'map(select(.body | contains("<!-- ocr-completeness-gate -->"))) | last | .id // empty' \
+                   2>/dev/null || true)
+            if [ -n "$PREV" ]; then
+              gh api "repos/${REPO}/issues/comments/${PREV}" --method PATCH \
+                --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null \
+                || echo "::warning::could not update the incomplete-review comment on PR #${PR_NUMBER}"
+            else
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" \
+                || echo "::warning::could not post the incomplete-review comment to PR #${PR_NUMBER}"
+            fi
           fi
 
           echo "::error::OCR covered ${N_COVERED} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."

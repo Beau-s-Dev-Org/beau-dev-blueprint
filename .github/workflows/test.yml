@@ -49,13 +49,29 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: scripts/requirements.txt
 
-      # The test script parses the workflow with PyYAML to extract the step it
-      # tests. ubuntu-latest happens to ship it today, so this passed on an
-      # undeclared dependency — which is a build that works until the runner
-      # image changes and then fails for a reason unrelated to the tests.
+      # Both of this suite's dependencies, declared rather than assumed. The
+      # script parses the workflow with PyYAML to extract the step it tests, and
+      # the extracted step parses the result JSON with jq — ubuntu-latest ships
+      # both today, so the suite passed on what the runner image happens to
+      # carry. A gate that breaks when that image changes, for a reason nothing
+      # in this repo touched, is the dormant failure this workflow exists to
+      # catch.
+      #
+      # PyYAML is pinned exactly: an open 6.x range resolves whatever exists at
+      # run time, so a bad release breaks CI with no change here.
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check 'pyyaml>=6,<7'
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements.txt
+
+      - name: Require jq
+        run: |
+          command -v jq >/dev/null || {
+            echo "::error::jq is not on PATH; the step under test parses JSON with it."
+            exit 1
+          }
+          jq --version
 
       - name: OCR completeness gate
         run: bash scripts/test-ocr-completeness.sh
