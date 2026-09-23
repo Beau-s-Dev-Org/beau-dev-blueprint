@@ -330,18 +330,29 @@ jobs:
             exit 0
           fi
 
-          # Require the shape, not just a truthy .coverage. A v2 result with
-          # "coverage": {} passes an existence check, and `.failed | length`
-          # on an absent field is 0 — so an upstream shape change would sail
-          # through the success branch as "0 completed" and hand back the green
-          # approval this step exists to withhold.
+          # Two things have to hold before the coverage numbers mean anything:
+          # the schema has to be one this step was written against, and the
+          # arrays have to be arrays.
+          #
+          # The version comparison is the point. An earlier version checked only
+          # the array types while its own message claimed "this step expects
+          # ocr.run-manifest/v1" — so a v2 manifest that happened to keep
+          # selected/completed/failed sailed through and exited as a full
+          # review, with the message asserting a guarantee the code never made.
+          # Verified before fixing.
+          SCHEMA=$(jq -r '.manifest.schema_version // "absent"' "$RESULT")
+          if [ "$SCHEMA" != "ocr.run-manifest/v1" ]; then
+            echo "::warning::OCR result declares schema_version ${SCHEMA}; this step understands ocr.run-manifest/v1 only, so review completeness could not be verified. Treat this check as 'unknown', not 'passed'."
+            echo "⚠️ OCR completeness could not be verified (unrecognised result schema: ${SCHEMA})." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           if ! jq -e '.manifest.coverage
                       | (.selected | type == "array")
                         and (.completed | type == "array")
                         and (.failed | type == "array")' "$RESULT" >/dev/null 2>&1; then
-            SCHEMA=$(jq -r '.manifest.schema_version // "absent"' "$RESULT")
-            echo "::warning::OCR result has no usable .manifest.coverage arrays (schema_version: ${SCHEMA}); completeness could not be verified. This step expects ocr.run-manifest/v1."
-            echo "⚠️ OCR completeness could not be verified (unexpected result schema: ${SCHEMA})." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::OCR result declares ${SCHEMA} but has no usable .manifest.coverage arrays; completeness could not be verified."
+            echo "⚠️ OCR completeness could not be verified (coverage arrays missing or malformed)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -363,18 +374,31 @@ jobs:
 
           TERMINAL=$(jq -r '.manifest.terminal_state // ""' "$RESULT")
           STATUS=$(jq -r '.status // ""' "$RESULT")
+          N_FAILED=$(jq '.manifest.coverage.failed | length' "$RESULT")
 
-          # Nothing selected means there was nothing to review — a Markdown-only
-          # diff, say. That is a true "nothing to approve", not silence, and it
-          # says so rather than claiming it reviewed everything.
-          if [ "${N_SELECTED:-0}" -eq 0 ]; then
+          # The explicit signals are checked FIRST, before any exemption. An
+          # earlier version put the empty-selection shortcut above them, so a
+          # result that said "partial" — or carried failed entries — while
+          # reporting an empty selected list exited green before either check
+          # ran. An exemption that outranks the signals it is meant to sit
+          # beside is not an exemption, it is a bypass.
+          INCOMPLETE=no
+          [ "$TERMINAL" = "partial" ] && INCOMPLETE=yes
+          [ "$STATUS" = "partial" ] && INCOMPLETE=yes
+          [ "${N_FAILED:-0}" -gt 0 ] && INCOMPLETE=yes
+          [ "${N_COVERED:-0}" -ne "${N_SELECTED:-0}" ] && INCOMPLETE=yes
+
+          # Only then: nothing selected means there was genuinely nothing to
+          # review — a Markdown-only diff, say. That is a true "nothing to
+          # approve", not silence, and it says so rather than claiming it
+          # reviewed everything.
+          if [ "$INCOMPLETE" = "no" ] && [ "${N_SELECTED:-0}" -eq 0 ]; then
             echo "OCR selected no files for review (status: ${STATUS:-?}); there is nothing for this gate to withhold."
             echo "ℹ️ OCR selected no files for review — nothing to approve or withhold." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          if [ "${N_COVERED:-0}" -eq "${N_SELECTED:-0}" ] \
-             && [ "$TERMINAL" != "partial" ] && [ "$STATUS" != "partial" ]; then
+          if [ "$INCOMPLETE" = "no" ]; then
             echo "OCR reviewed every item it selected (${N_COVERED} of ${N_SELECTED})."
             exit 0
           fi
@@ -391,6 +415,9 @@ jobs:
                   | grep -q . || echo "- \`$(jq -r --arg id "$id" '.manifest.coverage.selected[] | select((.item_id // .path) == $id) | .path' "$RESULT")\` — not reported in any coverage bucket"
               done)
           UNREVIEWED=$(printf '%s\n%s' "$FAILED_LINES" "$UNACCOUNTED" | grep -v '^$' || true)
+          # A run can declare itself partial while naming nothing — say so
+          # rather than printing an empty list under a heading.
+          [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
 
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::error::OCR did not review ${line#- }"
