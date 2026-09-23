@@ -112,6 +112,18 @@ V1_EMPTY_ID_DONE='{"status":"success","manifest":{"schema_version":"ocr.run-mani
 V1_BOTH_EMPTY='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"","path":""}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 # One entry's path equal to another's item_id: comparing bare strings let them
 # alias under sort -u, so two selected items counted as one.
+# git permits a newline in a filename. The comparison used to run through
+# newline-delimited sort/comm, where one path became two lines.
+V1_NEWLINE_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"path":"a.py"},{"path":"b.py"},{"path":"a.py\nb.py"}],"completed":[{"path":"a.py"},{"path":"b.py"}],"failed":[],"reused":[],"waived":[]}}}'
+# The case that actually separates a jq comparison from a line-oriented one:
+# a file literally named "path:b.py" inside a newline path. Split into lines,
+# its fragments become byte-identical to two real entries and the third item
+# disappears -> "2 of 2" and a green check. Compared as values, it stays three.
+V1_NEWLINE_ALIAS='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"path":"a.py"},{"path":"b.py"},{"path":"a.py\npath:b.py"}],"completed":[{"path":"a.py"},{"path":"b.py"}],"failed":[],"reused":[],"waived":[]}}}'
+# "partial" is a schema-independent fact: it must outrank every abstain path.
+PARTIAL_BAD_COVERAGE='{"status":"partial","manifest":{"schema_version":"ocr.run-manifest/v1","coverage":{}}}'
+PARTIAL_BAD_SCHEMA='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v9","terminal_state":"partial"}}'
+PARTIAL_NOT_JSON='not json at all'
 V1_ID_COLLISION='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"a.py","path":"first.py"},{"item_id":"","path":"a.py"}],"completed":[{"item_id":"a.py","path":"first.py"}],"failed":[],"reused":[],"waived":[]}}}'
 V1_REUSED_STRING='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"path":"a.py"}],"completed":[{"path":"a.py"}],"failed":[],"reused":["b.py"],"waived":[]}}}'
 # A v2 result that still has a coverage OBJECT must not sneak through.
@@ -135,19 +147,24 @@ run_case "the count agrees with the listed paths"  1 "$MIXED"             "2 of 
 run_case "an item in no bucket is a gap"           1 "$UNACCOUNTED"       "not reported in any coverage bucket"
 run_case "a missing result warns, does not block"  0 NONE                 "could not be verified"
 run_case "an unknown schema warns, does not block" 0 "$NEW_SCHEMA"        "ocr.run-manifest/v2"
-run_case "an empty coverage object cannot pass"    0 "$V2_EMPTY_COVERAGE" "could not be verified"
-run_case "a v2 schema keeping v1 arrays abstains"  0 "$V2_WITH_ARRAYS"    "unrecognised result schema"
-run_case "a manifest with no schema abstains"     0 "$NO_SCHEMA"         "unrecognised result schema"
-run_case "a v1 result with empty coverage abstains" 0 "$V1_BAD_COVERAGE"  "coverage arrays missing or malformed"
-run_case "a v1 result with a non-array abstains"   0 "$V1_COVERAGE_NOT_ARRAYS" "coverage arrays missing or malformed"
-run_case "malformed selected entries abstain"      0 "$V1_SELECTED_STRINGS" "coverage arrays missing or malformed"
-run_case "an entry with no id or path abstains"    0 "$V1_ENTRY_NO_ID"      "coverage arrays missing or malformed"
-run_case "a malformed reused entry abstains"       0 "$V1_REUSED_STRING"    "coverage arrays missing or malformed"
+run_case "an empty coverage object cannot pass"    0 "$V2_EMPTY_COVERAGE" "ocr.run-manifest/v2"
+run_case "a v2 schema keeping v1 arrays abstains"  0 "$V2_WITH_ARRAYS"    "understands ocr.run-manifest/v1 only"
+run_case "a manifest with no schema abstains"     0 "$NO_SCHEMA"         "schema_version absent"
+run_case "a v1 result with empty coverage abstains" 0 "$V1_BAD_COVERAGE"  "coverage arrays are missing or hold entries"
+run_case "a v1 result with a non-array abstains"   0 "$V1_COVERAGE_NOT_ARRAYS" "coverage arrays are missing or hold entries"
+run_case "malformed selected entries abstain"      0 "$V1_SELECTED_STRINGS" "without a usable item_id/path"
+run_case "an entry with no id or path abstains"    0 "$V1_ENTRY_NO_ID"      "without a usable item_id/path"
+run_case "a malformed reused entry abstains"       0 "$V1_REUSED_STRING"    "without a usable item_id/path"
 run_case "an empty id falls back to the path"      1 "$V1_EMPTY_ID"         "A partial review is not an approval"
 run_case "  ...and passes when actually reviewed"  0 "$V1_EMPTY_ID_DONE"    "reviewed every item it selected"
-run_case "no usable identity at all abstains"      0 "$V1_BOTH_EMPTY"       "coverage arrays missing or malformed"
+run_case "no usable identity at all abstains"      0 "$V1_BOTH_EMPTY"       "without a usable item_id/path"
 run_case "a path cannot alias another item_id"     1 "$V1_ID_COLLISION"     "covered 1 of 2"
 run_case "  ...and names the real missing file"    1 "$V1_ID_COLLISION"     'OCR did not review `a.py`'
+run_case "a newline in a path cannot merge items" 1 "$V1_NEWLINE_PATH"     "covered 2 of 3"
+run_case "  ...and still names it readably"       1 "$V1_NEWLINE_PATH"     'a.py\nb.py'
+run_case "a newline cannot forge two identities"  1 "$V1_NEWLINE_ALIAS"    "covered 2 of 3"
+run_case "partial outranks a malformed coverage"  1 "$PARTIAL_BAD_COVERAGE" "A partial review is not an approval"
+run_case "partial outranks an unknown schema"     1 "$PARTIAL_BAD_SCHEMA"  "A partial review is not an approval"
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'

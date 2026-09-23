@@ -319,121 +319,98 @@ jobs:
           set -uo pipefail
           RESULT=/tmp/ocr-result.json
 
-          # Unknown is not the same as verified, so an unreadable result is
-          # reported loudly rather than passed over — but it does not fail the
-          # job. A result whose shape changed upstream would otherwise turn
-          # every PR in every consuming repo red at once, and the first fix
-          # anyone reached for would be deleting this step.
-          if [ ! -s "$RESULT" ] || ! jq -e . "$RESULT" >/dev/null 2>&1; then
-            echo "::warning::OCR reported success but $RESULT is missing or not valid JSON, so review completeness could not be verified. Treat this check as 'unknown', not 'passed'."
-            echo "⚠️ OCR completeness could not be verified (no readable result JSON)." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          # The two signals below are schema-independent facts: OCR saying
+          # "partial" means partial whatever shape the rest of the document is
+          # in. They are read FIRST, because an earlier version checked the
+          # schema and the coverage shape before them — so a result reading
+          # {"status":"partial", ..., "coverage":{}} hit the malformed-shape
+          # warning and exited GREEN while literally declaring itself
+          # incomplete. Verified before fixing.
+          STATUS=""
+          TERMINAL=""
+          if [ -s "$RESULT" ] && jq -e . "$RESULT" >/dev/null 2>&1; then
+            STATUS=$(jq -r '.status // ""' "$RESULT")
+            TERMINAL=$(jq -r '.manifest.terminal_state // ""' "$RESULT")
           fi
+          DECLARED_PARTIAL=no
+          [ "$STATUS" = "partial" ] && DECLARED_PARTIAL=yes
+          [ "$TERMINAL" = "partial" ] && DECLARED_PARTIAL=yes
 
-          # Two things have to hold before the coverage numbers mean anything:
-          # the schema has to be one this step was written against, and the
-          # arrays have to be arrays.
-          #
-          # The version comparison is the point. An earlier version checked only
-          # the array types while its own message claimed "this step expects
-          # ocr.run-manifest/v1" — so a v2 manifest that happened to keep
-          # selected/completed/failed sailed through and exited as a full
-          # review, with the message asserting a guarantee the code never made.
-          # Verified before fixing.
+          # Every "we cannot tell" path goes through here. Unknown is not the
+          # same as verified, so it is reported loudly — but it does not fail
+          # the job, because a shape change upstream would otherwise redden
+          # every PR in every consuming repo at once and the first fix anyone
+          # reached for would be deleting this step. UNLESS the run already
+          # said it was partial, in which case there is nothing to be unsure
+          # about.
+          abstain() {
+            if [ "$DECLARED_PARTIAL" = "yes" ]; then
+              echo "::error::OCR declared itself partial (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}) and $1. A partial review is not an approval." >&2
+              {
+                echo "## ❌ OpenCodeReview did not finish"
+                echo
+                echo "The run reported itself **partial** (status: \`${STATUS:-?}\`, terminal_state: \`${TERMINAL:-?}\`)"
+                echo "and $1, so which files went unreviewed could not be determined."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "::warning::OCR completeness could not be verified: $1. Treat this check as 'unknown', not 'passed'."
+            echo "⚠️ OCR completeness could not be verified ($1)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
+          [ -s "$RESULT" ] || abstain "the result file is missing or empty"
+          jq -e . "$RESULT" >/dev/null 2>&1 || abstain "the result is not valid JSON"
+
           SCHEMA=$(jq -r '.manifest.schema_version // "absent"' "$RESULT")
-          if [ "$SCHEMA" != "ocr.run-manifest/v1" ]; then
-            echo "::warning::OCR result declares schema_version ${SCHEMA}; this step understands ocr.run-manifest/v1 only, so review completeness could not be verified. Treat this check as 'unknown', not 'passed'."
-            echo "⚠️ OCR completeness could not be verified (unrecognised result schema: ${SCHEMA})." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          [ "$SCHEMA" = "ocr.run-manifest/v1" ] \
+            || abstain "it declares schema_version ${SCHEMA} and this step understands ocr.run-manifest/v1 only"
 
-          # Arrays AND their contents. Checking only the array types let a
-          # malformed member through — "selected": ["a.py"] made the extraction
-          # below die with 'Cannot index string with "item_id"', and since this
-          # script deliberately runs without `set -e`, execution continued with
-          # an empty file, N_SELECTED=0, and a green exit through the
-          # empty-selection exemption. Malformed coverage became an approval.
-          # Verified before fixing.
-          # ONE definition of what an entry's identity is, spliced into both the
-          # guard and the extraction below, so the two cannot disagree about
-          # which entries count — a guard that accepts what the extraction then
-          # drops is how the last two bugs here worked.
+          # ONE definition of an entry's identity, used by every comparison
+          # below. Tagged with the field it came from: item_id and path are
+          # different namespaces, so untagged strings let one entry's path
+          # alias another's item_id and the two collapsed into one.
           #
-          # `.item_id // .path` was wrong twice over: jq's // only falls back on
-          # null/false, so an empty item_id BEAT a perfectly good path, and a
-          # type check passed it because "" is a string. The empty identity then
-          # wrote a blank line, `grep -c .` counted zero, and the review exited
-          # green through the empty-selection exemption. Verified before fixing.
-          # Tagged with the field it came from. item_id and path are different
-          # namespaces, so comparing the bare strings let one entry's path alias
-          # another entry's item_id: two distinct selected items collapsed under
-          # `sort -u`, and one completion then satisfied "1 of 1". Verified.
-          # (OCR's real item_ids are 64-hex digests, so this needs a pathological
-          # manifest — but the gate should not depend on that.)
+          # `.item_id // .path` was wrong twice over: jq's // falls back only on
+          # null/false, so an empty item_id BEAT a usable path, and a type check
+          # passed it because "" is a string.
           ID='(if (.item_id? | type == "string" and length > 0) then "item_id:" + .item_id
                elif (.path? | type == "string" and length > 0) then "path:" + .path
                else null end)'
 
-          if ! jq -e '.manifest.coverage
-                      | (.selected | type == "array")
-                        and (.completed | type == "array")
-                        and (.failed | type == "array")
-                        and ([.selected[], .completed[], (.reused // [])[],
-                              (.waived // [])[], .failed[]]
-                             | all(type == "object" and ('"$ID"' != null)))' \
-               "$RESULT" >/dev/null 2>&1; then
-            echo "::warning::OCR result declares ${SCHEMA} but its .manifest.coverage arrays are missing or contain entries without a usable item_id/path; completeness could not be verified."
-            echo "⚠️ OCR completeness could not be verified (coverage arrays missing or malformed)." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          jq -e '.manifest.coverage
+                 | (.selected | type == "array")
+                   and (.completed | type == "array")
+                   and (.failed | type == "array")
+                   and ([.selected[], .completed[], (.reused // [])[],
+                         (.waived // [])[], .failed[]]
+                        | all(type == "object" and ('"$ID"' != null)))' \
+             "$RESULT" >/dev/null 2>&1 \
+            || abstain "its coverage arrays are missing or hold entries without a usable item_id/path"
 
-          # Compare the coverage arithmetic against the SELECTED set rather
-          # than matching status strings. Every selected item that is not
-          # accounted for — completed, reused, or waived — was not reviewed,
-          # whether it landed in `failed` or simply went missing. That covers
-          # three states one rule at a time would have needed separate cases
-          # for: a partial run, a "skipped" run that still selected files, and
-          # a manifest that quietly drops items. Identity is item_id where
-          # present, path otherwise.
-          # UNREACHABLE TODAY, AND KEPT ANYWAY. The shape guard above validates
-          # every entry these read, so nothing in the test suite can make them
-          # fail — mutation-checked: deleting this branch changes no test.
-          # Retained because its failure mode is the worst one available here
-          # (a dead pipeline leaves an empty file, which reads as "nothing was
-          # selected" and exits green), and because it is the only thing that
-          # would catch that if the shape guard above is ever narrowed.
-          if ! jq -r '.manifest.coverage as $c
-                      | ($c.completed + ($c.reused // []) + ($c.waived // []))
-                      | map('"$ID"') | .[]' "$RESULT" | sort -u > /tmp/ocr-covered.txt \
-             || ! jq -r '.manifest.coverage.selected | map('"$ID"') | .[]' "$RESULT" \
-                  | sort -u > /tmp/ocr-selected.txt; then
-            echo "::warning::could not read the coverage entries out of the OCR result; completeness could not be verified."
-            echo "⚠️ OCR completeness could not be verified (coverage entries unreadable)." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          N_SELECTED=$(grep -c . /tmp/ocr-selected.txt || true)
-          N_COVERED=$(comm -12 /tmp/ocr-selected.txt /tmp/ocr-covered.txt | grep -c . || true)
+          # THE WHOLE COMPARISON HAPPENS INSIDE jq. It used to run through
+          # `sort`/`comm` on newline-delimited files, and git permits a newline
+          # in a filename — so one path could split into two lines and merge
+          # with other identities. jq compares the values themselves, so what a
+          # path contains stops being a question. The counts come back as two
+          # integers and the report as one line per entry, with the path
+          # @json-escaped so an exotic name cannot break the formatting either.
+          COUNTS=$(jq -r --argjson _ 0 '
+            .manifest.coverage as $c
+            | ([$c.selected[] | '"$ID"'] | unique) as $sel
+            | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
+            | [($sel | length), ($sel - ($sel - $cov) | length)]
+            | @tsv' "$RESULT") || abstain "its coverage entries could not be read"
+          N_SELECTED=$(printf '%s' "$COUNTS" | cut -f1)
+          N_COVERED=$(printf '%s' "$COUNTS" | cut -f2)
 
-          TERMINAL=$(jq -r '.manifest.terminal_state // ""' "$RESULT")
-          STATUS=$(jq -r '.status // ""' "$RESULT")
-          N_FAILED=$(jq '.manifest.coverage.failed | length' "$RESULT")
-
-          # The explicit signals are checked FIRST, before any exemption. An
-          # earlier version put the empty-selection shortcut above them, so a
-          # result that said "partial" — or carried failed entries — while
-          # reporting an empty selected list exited green before either check
-          # ran. An exemption that outranks the signals it is meant to sit
-          # beside is not an exemption, it is a bypass.
-          INCOMPLETE=no
-          [ "$TERMINAL" = "partial" ] && INCOMPLETE=yes
-          [ "$STATUS" = "partial" ] && INCOMPLETE=yes
-          [ "${N_FAILED:-0}" -gt 0 ] && INCOMPLETE=yes
+          INCOMPLETE="$DECLARED_PARTIAL"
+          [ "$(jq '.manifest.coverage.failed | length' "$RESULT")" -gt 0 ] && INCOMPLETE=yes
           [ "${N_COVERED:-0}" -ne "${N_SELECTED:-0}" ] && INCOMPLETE=yes
 
-          # Only then: nothing selected means there was genuinely nothing to
-          # review — a Markdown-only diff, say. That is a true "nothing to
-          # approve", not silence, and it says so rather than claiming it
-          # reviewed everything.
+          # Only once the signals are clean: nothing selected means there was
+          # genuinely nothing to review — a Markdown-only diff, say. That is a
+          # true "nothing to approve", not silence.
           if [ "$INCOMPLETE" = "no" ] && [ "${N_SELECTED:-0}" -eq 0 ]; then
             echo "OCR selected no files for review (status: ${STATUS:-?}); there is nothing for this gate to withhold."
             echo "ℹ️ OCR selected no files for review — nothing to approve or withhold." >> "$GITHUB_STEP_SUMMARY"
@@ -445,20 +422,19 @@ jobs:
             exit 0
           fi
 
-          # Two kinds of gap, reported separately because they need different
-          # things from the reader: a failed item comes with a reason, an
-          # unaccounted one does not exist in any bucket at all.
-          FAILED_LINES=$(jq -r '.manifest.coverage.failed[]?
-            | "- `\(.path)` — \(.classification // "unknown")\(if .reason then ": " + .reason else "" end)"' "$RESULT")
-          UNACCOUNTED=$(comm -23 /tmp/ocr-selected.txt /tmp/ocr-covered.txt \
-            | while IFS= read -r id; do
-                [ -n "$id" ] || continue
-                jq -r --arg id "$id" '.manifest.coverage.failed[]? | select('"$ID"' == $id) | .path' "$RESULT" \
-                  | grep -q . || echo "- \`$(jq -r --arg id "$id" '.manifest.coverage.selected[] | select('"$ID"' == $id) | .path' "$RESULT")\` — not reported in any coverage bucket"
-              done)
-          UNREVIEWED=$(printf '%s\n%s' "$FAILED_LINES" "$UNACCOUNTED" | grep -v '^$' || true)
-          # A run can declare itself partial while naming nothing — say so
-          # rather than printing an empty list under a heading.
+          # Failed entries carry a reason; an unaccounted one exists in no
+          # bucket at all and has none to give.
+          UNREVIEWED=$(jq -r '
+            .manifest.coverage as $c
+            | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
+            | ([$c.failed[] | '"$ID"'] | unique) as $failed
+            | ( [ $c.failed[]
+                  | "- `\(.path // "?" | @json | .[1:-1])` — \(.classification // "unknown")"
+                    + (if .reason then ": " + .reason else "" end) ]
+              + [ $c.selected[]
+                  | select(('"$ID"' | IN($cov[]) | not) and ('"$ID"' | IN($failed[]) | not))
+                  | "- `\(.path // "?" | @json | .[1:-1])` — not reported in any coverage bucket" ] )
+            | .[]' "$RESULT" || true)
           [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
 
           while IFS= read -r line; do
@@ -474,8 +450,6 @@ jobs:
             echo "$UNREVIEWED"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Put it on the PR too: the point is that this is visible without
-          # opening a run log.
           if [ -n "${PR_NUMBER:-}" ]; then
             {
               echo "## ❌ OpenCodeReview did not finish"
