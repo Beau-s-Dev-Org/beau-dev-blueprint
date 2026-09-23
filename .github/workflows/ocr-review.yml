@@ -403,6 +403,25 @@ jobs:
               2>/dev/null || true
           }
 
+          # Post or update, in one place. Three paths need it — incomplete,
+          # abstained and cleared — and an earlier version had the logic only on
+          # the incomplete path, so an abstention left whatever the previous run
+          # had said standing on the PR.
+          upsert_gate_comment() {  # body already written to OCR_COMMENT_FILE
+            [ -n "${PR_NUMBER:-}" ] || return 0
+            local prev
+            prev=$(find_gate_comment)
+            if [ -n "$prev" ]; then
+              gh api "repos/${REPO}/issues/comments/${prev}" --method PATCH \
+                --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
+                || echo "::warning::could not update the gate comment on PR #${PR_NUMBER}"
+            else
+              gh pr comment "$PR_NUMBER" --repo "$REPO" \
+                --body-file "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
+                || echo "::warning::could not post the gate comment to PR #${PR_NUMBER}"
+            fi
+          }
+
           clear_gate_comment() {  # $1 = one-line reason this run was fine
             local prev
             prev=$(find_gate_comment)
@@ -416,9 +435,7 @@ jobs:
               echo
               echo "<sub>[Run log](${RUN_URL})</sub>"
             } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
-            gh api "repos/${REPO}/issues/comments/${prev}" --method PATCH \
-              --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
-              || echo "::warning::could not clear the stale incomplete-review comment on PR #${PR_NUMBER}"
+            upsert_gate_comment
           }
 
           abstain() {
@@ -430,10 +447,37 @@ jobs:
                 echo "The run reported itself **partial** (status: \`${STATUS:-?}\`, terminal_state: \`${TERMINAL:-?}\`)"
                 echo "and $1, so which files went unreviewed could not be determined."
               } >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "$GATE_MARKER"
+                echo "## ❌ OpenCodeReview did not finish"
+                echo
+                echo "The run reported itself **partial** and $1, so **which** files went"
+                echo "unreviewed could not be determined. No finding count from this run"
+                echo "describes this pull request."
+                echo
+                echo "<sub>[Run log](${RUN_URL})</sub>"
+              } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+              upsert_gate_comment
               exit 1
             fi
             echo "::warning::OCR completeness could not be verified: $1. Treat this check as 'unknown', not 'passed'."
             echo "⚠️ OCR completeness could not be verified ($1)." >> "$GITHUB_STEP_SUMMARY"
+            # Still green by design — see the header — but a green required
+            # check meaning "we did not verify" is the very thing this file
+            # exists to stop being invisible. Say it where a reader sees it
+            # without opening the run log.
+            {
+              echo "$GATE_MARKER"
+              echo "## ⚠️ OpenCodeReview completeness unknown"
+              echo
+              echo "This check is **green but unverified**: $1."
+              echo
+              echo "The review itself may have been fine — this gate could not confirm it"
+              echo "covered everything. Treat it as unknown rather than passed."
+              echo
+              echo "<sub>[Run log](${RUN_URL})</sub>"
+            } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+            upsert_gate_comment
             exit 0
           }
 
@@ -552,15 +596,7 @@ jobs:
             # a marker every retry stacked another "did not finish" comment on
             # the PR — the same sticky pattern the OCR action uses for its own
             # summary.
-            PREV=$(find_gate_comment)
-            if [ -n "$PREV" ]; then
-              gh api "repos/${REPO}/issues/comments/${PREV}" --method PATCH \
-                --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null \
-                || echo "::warning::could not update the incomplete-review comment on PR #${PR_NUMBER}"
-            else
-              gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" \
-                || echo "::warning::could not post the incomplete-review comment to PR #${PR_NUMBER}"
-            fi
+            upsert_gate_comment
           fi
 
           echo "::error::OCR covered ${N_COVERED} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."

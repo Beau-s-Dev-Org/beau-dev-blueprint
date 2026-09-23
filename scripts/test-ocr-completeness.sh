@@ -94,10 +94,14 @@ $(cat "$WORK/summary.md")"
   if [ "$rc" = "$want" ] && printf '%s' "$combined" | grep -qF "$needle"; then
     # gh is only ever called on the incomplete path, so a green or abstaining
     # run that touched it is a regression the exit code alone would miss.
-    # A passing run may look up the sticky comment and clear a stale one; it
-    # must never POST a new "did not finish". `gh pr comment` is that post.
-    if [ "$want" = "0" ] && grep -q "pr comment" "$WORK/gh.log" 2>/dev/null; then
-      echo "  FAIL  $name (exited 0 but posted a PR comment: $(cat "$WORK/gh.log"))"
+    # A run that genuinely VERIFIED coverage must never post a "did not
+    # finish". An abstaining run is also green but does post, on purpose: a
+    # green check meaning "we did not verify" has to be visible somewhere
+    # other than the run log. So the invariant is about verified passes only.
+    if [ "$want" = "0" ] \
+       && printf '%s' "$combined" | grep -qE "reviewed every item it selected|selected no files for review" \
+       && grep -q "pr comment" "$WORK/gh.log" 2>/dev/null; then
+      echo "  FAIL  $name (verified pass, but posted a PR comment: $(cat "$WORK/gh.log"))"
       FAIL=$((FAIL+1)); return
     fi
     echo "  ok    $name"; PASS=$((PASS+1))
@@ -247,6 +251,34 @@ run_case "partial outranks an unknown schema"     1 "$PARTIAL_BAD_SCHEMA"  "A pa
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'
+
+# A run that declares itself partial AND is unverifiable fails — and must still
+# say so on the PR. Without this the check goes red with no PR-facing notice,
+# or worse leaves an earlier run's file list standing as if it were current.
+: > "$WORK/gh.log"; : > "$WORK/comment.md"
+printf '%s' "$PARTIAL_BAD_COVERAGE" > "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+  GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "pr comment" "$WORK/gh.log" && grep -q "did not finish" "$WORK/comment.md" 2>/dev/null; then
+  echo "  ok    a partial abstention still reaches the PR"; PASS=$((PASS+1))
+else
+  echo "  FAIL  a partial abstention left the PR with nothing"; FAIL=$((FAIL+1))
+fi
+
+# An abstention is green, and must still reach the PR — otherwise "green but
+# unverified" is indistinguishable from "verified" without opening the log.
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf 'not json at all' > "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+  GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "pr comment" "$WORK/gh.log" && grep -q "completeness unknown" "$WORK/comment.md" 2>/dev/null; then
+  echo "  ok    an abstention still reaches the PR"; PASS=$((PASS+1))
+else
+  echo "  FAIL  an abstention left the PR with nothing"; FAIL=$((FAIL+1))
+fi
 
 # A passing rerun must clear a stale "did not finish" rather than leave the PR
 # claiming files were unreviewed after a run that covered them.
