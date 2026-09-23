@@ -365,6 +365,38 @@ jobs:
           # reached for would be deleting this step. UNLESS the run already
           # said it was partial, in which case there is nothing to be unsure
           # about.
+          # The sticky comment is written only on the incomplete path, so a later
+          # run that PASSES used to exit without touching it — leaving the PR
+          # showing "did not finish" over a review that had since covered
+          # everything. Both success paths clear it now. Lookup failures are
+          # non-fatal: reporting must never be able to fail a valid review.
+          GATE_MARKER='<!-- ocr-completeness-gate -->'
+
+          find_gate_comment() {
+            [ -n "${PR_NUMBER:-}" ] || return 0
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+              --jq "map(select(.body | contains(\"$GATE_MARKER\"))) | last | .id // empty" \
+              2>/dev/null || true
+          }
+
+          clear_gate_comment() {  # $1 = one-line reason this run was fine
+            local prev
+            prev=$(find_gate_comment)
+            [ -n "$prev" ] || return 0
+            {
+              echo "$GATE_MARKER"
+              echo "## ✅ OpenCodeReview completeness"
+              echo
+              echo "A later run $1, so the incomplete-review notice above no longer"
+              echo "describes this pull request."
+              echo
+              echo "<sub>[Run log](${RUN_URL})</sub>"
+            } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+            gh api "repos/${REPO}/issues/comments/${prev}" --method PATCH \
+              --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
+              || echo "::warning::could not clear the stale incomplete-review comment on PR #${PR_NUMBER}"
+          }
+
           abstain() {
             if [ "$DECLARED_PARTIAL" = "yes" ]; then
               echo "::error::OCR declared itself partial (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}) and $1. A partial review is not an approval." >&2
@@ -436,11 +468,13 @@ jobs:
           if [ "$INCOMPLETE" = "no" ] && [ "${N_SELECTED:-0}" -eq 0 ]; then
             echo "OCR selected no files for review (status: ${STATUS:-?}); there is nothing for this gate to withhold."
             echo "ℹ️ OCR selected no files for review — nothing to approve or withhold." >> "$GITHUB_STEP_SUMMARY"
+            clear_gate_comment "selected no files to review"
             exit 0
           fi
 
           if [ "$INCOMPLETE" = "no" ]; then
             echo "OCR reviewed every item it selected (${N_COVERED} of ${N_SELECTED})."
+            clear_gate_comment "reviewed every item it selected (${N_COVERED} of ${N_SELECTED})"
             exit 0
           fi
 
@@ -492,9 +526,7 @@ jobs:
             # a marker every retry stacked another "did not finish" comment on
             # the PR — the same sticky pattern the OCR action uses for its own
             # summary.
-            PREV=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-                     --jq 'map(select(.body | contains("<!-- ocr-completeness-gate -->"))) | last | .id // empty' \
-                   2>/dev/null || true)
+            PREV=$(find_gate_comment)
             if [ -n "$PREV" ]; then
               gh api "repos/${REPO}/issues/comments/${PREV}" --method PATCH \
                 --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null \

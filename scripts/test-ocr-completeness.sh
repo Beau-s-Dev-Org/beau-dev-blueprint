@@ -33,7 +33,16 @@ PY
 
 # gh must not actually post from a test run.
 mkdir -p "$WORK/bin"
-printf '#!/bin/sh\necho "[gh] $*" >> "%s/gh.log"\nexit 0\n' "$WORK" > "$WORK/bin/gh"
+cat > "$WORK/bin/gh" <<GHEOF
+#!/bin/sh
+echo "[gh] \$*" >> "$WORK/gh.log"
+# When OCR_FAKE_PRIOR_COMMENT is set, the marker lookup finds an existing
+# comment, so the clear/update path is exercised instead of short-circuiting.
+case "\$*" in
+  *issues/*/comments*--paginate*) [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ] && echo 4242 ;;
+esac
+exit 0
+GHEOF
 chmod +x "$WORK/bin/gh"
 
 PASS=0; FAIL=0
@@ -63,8 +72,10 @@ $(cat "$WORK/summary.md")"
   if [ "$rc" = "$want" ] && printf '%s' "$combined" | grep -qF "$needle"; then
     # gh is only ever called on the incomplete path, so a green or abstaining
     # run that touched it is a regression the exit code alone would miss.
-    if [ "$want" = "0" ] && [ -s "$WORK/gh.log" ]; then
-      echo "  FAIL  $name (exited 0 but used the gh channel: $(cat "$WORK/gh.log"))"
+    # A passing run may look up the sticky comment and clear a stale one; it
+    # must never POST a new "did not finish". `gh pr comment` is that post.
+    if [ "$want" = "0" ] && grep -q "pr comment" "$WORK/gh.log" 2>/dev/null; then
+      echo "  FAIL  $name (exited 0 but posted a PR comment: $(cat "$WORK/gh.log"))"
       FAIL=$((FAIL+1)); return
     fi
     echo "  ok    $name"; PASS=$((PASS+1))
@@ -201,6 +212,31 @@ run_case "partial outranks an unknown schema"     1 "$PARTIAL_BAD_SCHEMA"  "A pa
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'
+
+# A passing rerun must clear a stale "did not finish" rather than leave the PR
+# claiming files were unreviewed after a run that covered them.
+: > "$WORK/gh.log"; printf '%s' "$COMPLETE" > "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_FAKE_PRIOR_COMMENT=1 OCR_RESULT_FILE="$WORK/result.json" \
+  OCR_COMMENT_FILE="$WORK/comment.md" GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "PATCH" "$WORK/gh.log" && grep -q "OpenCodeReview completeness" "$WORK/comment.md" 2>/dev/null; then
+  echo "  ok    a passing rerun clears a stale failure"; PASS=$((PASS+1))
+else
+  echo "  FAIL  a passing rerun left the stale failure comment"; FAIL=$((FAIL+1))
+fi
+
+# ...and with no prior comment it must not invent one.
+: > "$WORK/gh.log"; printf '%s' "$COMPLETE" > "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+  GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "PATCH" "$WORK/gh.log"; then
+  echo "  FAIL  a clean pass edited a comment that does not exist"; FAIL=$((FAIL+1))
+else
+  echo "  ok    a clean pass writes no comment at all"; PASS=$((PASS+1))
+fi
 
 # The PR comment is a distinct channel from the annotations; check it moved.
 : > "$WORK/gh.log"; printf '%s' "$PARTIAL" > "$WORK/result.json"
