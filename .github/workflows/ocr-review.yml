@@ -105,6 +105,16 @@ jobs:
     # attempts (3 × 20) plus overhead, guaranteeing the final fail-gate step
     # still runs instead of being cancelled by the job timeout.
     timeout-minutes: 65
+    # Declared here rather than inherited. A reusable workflow with no
+    # permissions block takes the caller's, so what this job can do depended on
+    # every consuming repo's stub and on repository defaults — under a
+    # restrictive default the incomplete-review comment below would silently
+    # degrade to a ::warning::, which is the failure mode this whole file is
+    # about. pull-requests: write is what `gh pr comment` needs; nothing here
+    # writes contents or touches issues.
+    permissions:
+      contents: read
+      pull-requests: write
     # The secrets context is NOT available in step-level `if:` conditions
     # (only github/needs/strategy/matrix/job/runner/env/vars/steps/inputs are),
     # so "is this fallback configured?" is computed here in job env — where
@@ -275,6 +285,327 @@ jobs:
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
+
+      - name: Fail if the review only partially ran
+        # OCR exits 0 when it reviewed SOME of the files it selected. Its own
+        # result then reads:
+        #
+        #   "status": "partial",
+        #   "message": "Review partially complete: 0 finding(s); 2 of 5 selected item(s) failed.",
+        #   "manifest": { "terminal_state": "partial",
+        #                 "coverage": { "failed": [ { "path": ..., "classification": "timeout" } ] } }
+        #
+        # ...and every surface above it stays green: this check, `gh pr checks`,
+        # the PR's merge state. "0 findings" then means "we did not look",
+        # which is indistinguishable from "we looked and found nothing" unless
+        # someone opens this log and reads the JSON.
+        #
+        # Not hypothetical. On marketing-as-code#348 (2026-09-18, run
+        # 35397919573) the two files carrying all the logic under review both
+        # exceeded the per-file time limit and were never read; the three that
+        # completed were a test module, a settings JSON and one script. The
+        # check went green and the PR was a click from merging on a review that
+        # had not happened. Note summary.files_reviewed said 5 — it counts
+        # SELECTED items, not reviewed ones, so it cannot be used here.
+        #
+        # Every consuming repo's merge policy says a review that never ran is
+        # not approval. This step is what makes that enforceable from the PR
+        # page instead of from a log.
+        #
+        # Runs whenever an attempt SUCCEEDED — the all-failed case belongs to
+        # the next step, where /tmp/ocr-result.json is absent or stale.
+        if: >-
+          steps.ocr-primary.outcome == 'success'
+          || steps.ocr-fallback1.outcome == 'success'
+          || steps.ocr-fallback2.outcome == 'success'
+        shell: bash
+        env:
+          # BEA-327: never interpolate a context value into a run body.
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # Overridable so the test harness can run hermetically; unchanged in
+          # Actions, where nothing sets it.
+          RESULT="${OCR_RESULT_FILE:-/tmp/ocr-result.json}"
+          # Actions always sets this; the default exists so that if it ever is
+          # not set, `set -u` does not abort the incomplete path halfway and
+          # take the PR comment down with it. Found by enumerating the gate's
+          # states rather than by a review.
+          : "${GITHUB_STEP_SUMMARY:=/dev/null}"
+
+          # The two signals below are schema-independent facts: OCR saying
+          # "partial" means partial whatever shape the rest of the document is
+          # in. They are read FIRST, because an earlier version checked the
+          # schema and the coverage shape before them — so a result reading
+          # {"status":"partial", ..., "coverage":{}} hit the malformed-shape
+          # warning and exited GREEN while literally declaring itself
+          # incomplete. Verified before fixing.
+          STATUS=""
+          TERMINAL=""
+          if [ -s "$RESULT" ] && jq -e . "$RESULT" >/dev/null 2>&1; then
+            # @json-escaped: these are interpolated into ::error:: annotations
+            # and into the PR comment, and a newline in either would split one
+            # line into several. The forged-workflow-command half of that is
+            # blocked by every line carrying its own prefix, but the format
+            # damage and the misleading extra annotations are real.
+            # Type-guarded and `|| true`. A valid-JSON result whose root or
+            # .manifest is a scalar or array makes a bare .status/.manifest
+            # lookup error, and Actions runs this step with -e, so the command
+            # substitution aborted the whole job — turning the deliberately
+            # non-blocking "we cannot tell" into a red check everywhere. rc=5,
+            # verified.
+            STATUS=$(jq -r 'if type == "object" then (.status? // "") else "" end
+                            | if type == "string" then . else "" end
+                            | @json | .[1:-1]' "$RESULT" 2>/dev/null || true)
+            TERMINAL=$(jq -r 'if (type == "object") and ((.manifest? | type) == "object")
+                              then (.manifest.terminal_state? // "") else "" end
+                              | if type == "string" then . else "" end
+                              | @json | .[1:-1]' "$RESULT" 2>/dev/null || true)
+          fi
+          DECLARED_PARTIAL=no
+          [ "$STATUS" = "partial" ] && DECLARED_PARTIAL=yes
+          [ "$TERMINAL" = "partial" ] && DECLARED_PARTIAL=yes
+
+          # Every "we cannot tell" path goes through here. Unknown is not the
+          # same as verified, so it is reported loudly — but it does not fail
+          # the job, because a shape change upstream would otherwise redden
+          # every PR in every consuming repo at once and the first fix anyone
+          # reached for would be deleting this step. UNLESS the run already
+          # said it was partial, in which case there is nothing to be unsure
+          # about.
+          # The sticky comment is written only on the incomplete path, so a later
+          # run that PASSES used to exit without touching it — leaving the PR
+          # showing "did not finish" over a review that had since covered
+          # everything. Both success paths clear it now. Lookup failures are
+          # non-fatal: reporting must never be able to fail a valid review.
+          GATE_MARKER='<!-- ocr-completeness-gate -->'
+
+          # Every matching id, newest last — not just the newest. Duplicates are
+          # reachable whenever a lookup fails transiently: that run sees none,
+          # posts a second, and a later success used to patch only one, leaving
+          # the other permanently claiming the PR was not reviewed.
+          find_gate_comment() {
+            [ -n "${PR_NUMBER:-}" ] || return 0
+            # --slurp, because --paginate runs --jq once PER PAGE: with a marker
+            # on two pages the substitution returned "101\n202" and the PATCH
+            # went to an endpoint containing both, failing with only a warning
+            # and leaving the stale notice up. Slurping gives one array across
+            # all pages, so `last` means the newest overall. Verified.
+            # Bot-authored only. Anyone can post a comment containing the
+            # marker; the PATCH would then target a comment this token did not
+            # write, fail, and — because a non-empty PREV skips the
+            # `gh pr comment` fallback — an incomplete review would get no PR
+            # notice at all.
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --slurp \
+              --jq "(add // [])
+                    | map(select((.user.type == \"Bot\")
+                                 and (.body | contains(\"$GATE_MARKER\"))))
+                    | .[].id" \
+              2>/dev/null || true
+          }
+
+          # Post or update, in one place. Three paths need it — incomplete,
+          # abstained and cleared — and an earlier version had the logic only on
+          # the incomplete path, so an abstention left whatever the previous run
+          # had said standing on the PR.
+          upsert_gate_comment() {  # body already written to OCR_COMMENT_FILE
+            [ -n "${PR_NUMBER:-}" ] || return 0
+            local ids found
+            ids=$(find_gate_comment)
+            found=0
+            while IFS= read -r id; do
+              [ -n "$id" ] || continue
+              found=1
+              gh api "repos/${REPO}/issues/comments/${id}" --method PATCH \
+                --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
+                || echo "::warning::could not update gate comment ${id} on PR #${PR_NUMBER}"
+            done <<< "$ids"
+            [ "$found" = "1" ] && return 0
+            gh pr comment "$PR_NUMBER" --repo "$REPO" \
+              --body-file "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
+              || echo "::warning::could not post the gate comment to PR #${PR_NUMBER}"
+          }
+
+          clear_gate_comment() {  # $1 = one-line reason this run was fine
+            [ -n "$(find_gate_comment)" ] || return 0
+            {
+              echo "$GATE_MARKER"
+              echo "## ✅ OpenCodeReview completeness"
+              echo
+              echo "A later run $1, so the incomplete-review notice above no longer"
+              echo "describes this pull request."
+              echo
+              echo "<sub>[Run log](${RUN_URL})</sub>"
+            } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+            upsert_gate_comment
+          }
+
+          abstain() {
+            if [ "$DECLARED_PARTIAL" = "yes" ]; then
+              echo "::error::OCR declared itself partial (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}) and $1. A partial review is not an approval." >&2
+              {
+                echo "## ❌ OpenCodeReview did not finish"
+                echo
+                echo "The run reported itself **partial** (status: \`${STATUS:-?}\`, terminal_state: \`${TERMINAL:-?}\`)"
+                echo "and $1, so which files went unreviewed could not be determined."
+              } >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "$GATE_MARKER"
+                echo "## ❌ OpenCodeReview did not finish"
+                echo
+                echo "The run reported itself **partial** and $1, so **which** files went"
+                echo "unreviewed could not be determined. No finding count from this run"
+                echo "describes this pull request."
+                echo
+                echo "<sub>[Run log](${RUN_URL})</sub>"
+              } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+              upsert_gate_comment
+              exit 1
+            fi
+            echo "::warning::OCR completeness could not be verified: $1. Treat this check as 'unknown', not 'passed'."
+            echo "⚠️ OCR completeness could not be verified ($1)." >> "$GITHUB_STEP_SUMMARY"
+            # Still green by design — see the header — but a green required
+            # check meaning "we did not verify" is the very thing this file
+            # exists to stop being invisible. Say it where a reader sees it
+            # without opening the run log.
+            {
+              echo "$GATE_MARKER"
+              echo "## ⚠️ OpenCodeReview completeness unknown"
+              echo
+              echo "This check is **green but unverified**: $1."
+              echo
+              echo "The review itself may have been fine — this gate could not confirm it"
+              echo "covered everything. Treat it as unknown rather than passed."
+              echo
+              echo "<sub>[Run log](${RUN_URL})</sub>"
+            } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+            upsert_gate_comment
+            exit 0
+          }
+
+          [ -s "$RESULT" ] || abstain "the result file is missing or empty"
+          jq -e . "$RESULT" >/dev/null 2>&1 || abstain "the result is not valid JSON"
+
+          SCHEMA=$(jq -r 'if (type == "object") and ((.manifest? | type) == "object")
+                          then (.manifest.schema_version? // "absent") else "absent" end
+                          | if type == "string" then . else "absent" end' "$RESULT" 2>/dev/null || echo absent)
+          [ "$SCHEMA" = "ocr.run-manifest/v1" ] \
+            || abstain "it declares schema_version ${SCHEMA} and this step understands ocr.run-manifest/v1 only"
+
+          # ONE definition of an entry's identity, used by every comparison
+          # below. Tagged with the field it came from: item_id and path are
+          # different namespaces, so untagged strings let one entry's path
+          # alias another's item_id and the two collapsed into one.
+          #
+          # `.item_id // .path` was wrong twice over: jq's // falls back only on
+          # null/false, so an empty item_id BEAT a usable path, and a type check
+          # passed it because "" is a string.
+          ID='(if (.item_id? | type == "string" and length > 0) then "item_id:" + .item_id
+               elif (.path? | type == "string" and length > 0) then "path:" + .path
+               else null end)'
+
+          jq -e '.manifest.coverage
+                 | (.selected | type == "array")
+                   and (.completed | type == "array")
+                   and (.failed | type == "array")
+                   and ([.selected[], .completed[], (.reused // [])[],
+                         (.waived // [])[], .failed[]]
+                        | all(type == "object" and ('"$ID"' != null)))' \
+             "$RESULT" >/dev/null 2>&1 \
+            || abstain "its coverage arrays are missing or hold entries without a usable item_id/path"
+
+          # THE WHOLE COMPARISON HAPPENS INSIDE jq. It used to run through
+          # `sort`/`comm` on newline-delimited files, and git permits a newline
+          # in a filename — so one path could split into two lines and merge
+          # with other identities. jq compares the values themselves, so what a
+          # path contains stops being a question. The counts come back as two
+          # integers and the report as one line per entry, with the path
+          # @json-escaped so an exotic name cannot break the formatting either.
+          COUNTS=$(jq -r '
+            .manifest.coverage as $c
+            | ([$c.selected[] | '"$ID"'] | unique) as $sel
+            | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
+            | [($sel | length), ($sel - ($sel - $cov) | length)]
+            | @tsv' "$RESULT") || abstain "its coverage entries could not be read"
+          N_SELECTED=$(printf '%s' "$COUNTS" | cut -f1)
+          N_COVERED=$(printf '%s' "$COUNTS" | cut -f2)
+
+          INCOMPLETE="$DECLARED_PARTIAL"
+          [ "$(jq '.manifest.coverage.failed | length' "$RESULT")" -gt 0 ] && INCOMPLETE=yes
+          [ "${N_COVERED:-0}" -ne "${N_SELECTED:-0}" ] && INCOMPLETE=yes
+
+          # Only once the signals are clean: nothing selected means there was
+          # genuinely nothing to review — a Markdown-only diff, say. That is a
+          # true "nothing to approve", not silence.
+          if [ "$INCOMPLETE" = "no" ] && [ "${N_SELECTED:-0}" -eq 0 ]; then
+            echo "OCR selected no files for review (status: ${STATUS:-?}); there is nothing for this gate to withhold."
+            echo "ℹ️ OCR selected no files for review — nothing to approve or withhold." >> "$GITHUB_STEP_SUMMARY"
+            clear_gate_comment "selected no files to review"
+            exit 0
+          fi
+
+          if [ "$INCOMPLETE" = "no" ]; then
+            echo "OCR reviewed every item it selected (${N_COVERED} of ${N_SELECTED})."
+            clear_gate_comment "reviewed every item it selected (${N_COVERED} of ${N_SELECTED})"
+            exit 0
+          fi
+
+          # Failed entries carry a reason; an unaccounted one exists in no
+          # bucket at all and has none to give.
+          UNREVIEWED=$(jq -r '
+            .manifest.coverage as $c
+            | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
+            | ([$c.failed[] | '"$ID"'] | unique) as $failed
+            | ( [ $c.failed[]
+                  | "- \((if (.path? | type == "string" and length > 0) then .path elif (.item_id? | type == "string" and length > 0) then "item " + .item_id else "?" end) | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — \(.classification // "unknown" | @json | .[1:-1])"
+                    + (if .reason then ": " + (.reason | @json | .[1:-1]) else "" end) ]
+              + [ $c.selected[]
+                  | select(('"$ID"' | IN($cov[]) | not) and ('"$ID"' | IN($failed[]) | not))
+                  | "- \((if (.path? | type == "string" and length > 0) then .path elif (.item_id? | type == "string" and length > 0) then "item " + .item_id else "?" end) | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — not reported in any coverage bucket" ] )
+            | .[]' "$RESULT" || true)
+          [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
+
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error::OCR did not review ${line#- }"
+          done <<< "$UNREVIEWED"
+
+          {
+            echo "## ❌ OpenCodeReview did not finish"
+            echo
+            echo "Covered **${N_COVERED} of ${N_SELECTED}** selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?})."
+            echo "The files below were never read, so no finding count from this run applies to them."
+            echo
+            echo "$UNREVIEWED"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "${PR_NUMBER:-}" ]; then
+            {
+              echo "<!-- ocr-completeness-gate -->"
+              echo "## ❌ OpenCodeReview did not finish"
+              echo
+              echo "This review covered **${N_COVERED} of ${N_SELECTED}** selected files. The following were"
+              echo "selected and never reviewed, so **no finding count from this run applies to them**:"
+              echo
+              echo "$UNREVIEWED"
+              echo
+              echo "A review that did not run is not an approval. Re-run it by commenting"
+              echo "\`/open-code-review\`, or reduce the size of the files above — \`timeout\`"
+              echo "means the file exceeded the per-file limit and will keep doing so."
+              echo
+              echo "<sub>[Run log](${RUN_URL})</sub>"
+            } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+            # Update in place. The comment tells the reader to re-run, so without
+            # a marker every retry stacked another "did not finish" comment on
+            # the PR — the same sticky pattern the OCR action uses for its own
+            # summary.
+            upsert_gate_comment
+          fi
+
+          echo "::error::OCR covered ${N_COVERED} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."
+          exit 1
 
       - name: Fail if all review attempts failed
         # The attempt steps are continue-on-error, so this step is the only
