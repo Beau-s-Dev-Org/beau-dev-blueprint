@@ -354,14 +354,25 @@ jobs:
           # an empty file, N_SELECTED=0, and a green exit through the
           # empty-selection exemption. Malformed coverage became an approval.
           # Verified before fixing.
+          # ONE definition of what an entry's identity is, spliced into both the
+          # guard and the extraction below, so the two cannot disagree about
+          # which entries count — a guard that accepts what the extraction then
+          # drops is how the last two bugs here worked.
+          #
+          # `.item_id // .path` was wrong twice over: jq's // only falls back on
+          # null/false, so an empty item_id BEAT a perfectly good path, and a
+          # type check passed it because "" is a string. The empty identity then
+          # wrote a blank line, `grep -c .` counted zero, and the review exited
+          # green through the empty-selection exemption. Verified before fixing.
+          ID='([.item_id?, .path?] | map(select(type == "string" and length > 0)) | first)'
+
           if ! jq -e '.manifest.coverage
                       | (.selected | type == "array")
                         and (.completed | type == "array")
                         and (.failed | type == "array")
                         and ([.selected[], .completed[], (.reused // [])[],
                               (.waived // [])[], .failed[]]
-                             | all(type == "object"
-                                   and ((.item_id // .path) | type == "string")))' \
+                             | all(type == "object" and ('"$ID"' != null)))' \
                "$RESULT" >/dev/null 2>&1; then
             echo "::warning::OCR result declares ${SCHEMA} but its .manifest.coverage arrays are missing or contain entries without a usable item_id/path; completeness could not be verified."
             echo "⚠️ OCR completeness could not be verified (coverage arrays missing or malformed)." >> "$GITHUB_STEP_SUMMARY"
@@ -385,8 +396,8 @@ jobs:
           # would catch that if the shape guard above is ever narrowed.
           if ! jq -r '.manifest.coverage as $c
                       | ($c.completed + ($c.reused // []) + ($c.waived // []))
-                      | map(.item_id // .path) | .[]' "$RESULT" | sort -u > /tmp/ocr-covered.txt \
-             || ! jq -r '.manifest.coverage.selected | map(.item_id // .path) | .[]' "$RESULT" \
+                      | map('"$ID"') | .[]' "$RESULT" | sort -u > /tmp/ocr-covered.txt \
+             || ! jq -r '.manifest.coverage.selected | map('"$ID"') | .[]' "$RESULT" \
                   | sort -u > /tmp/ocr-selected.txt; then
             echo "::warning::could not read the coverage entries out of the OCR result; completeness could not be verified."
             echo "⚠️ OCR completeness could not be verified (coverage entries unreadable)." >> "$GITHUB_STEP_SUMMARY"
@@ -434,8 +445,8 @@ jobs:
           UNACCOUNTED=$(comm -23 /tmp/ocr-selected.txt /tmp/ocr-covered.txt \
             | while IFS= read -r id; do
                 [ -n "$id" ] || continue
-                jq -r --arg id "$id" '.manifest.coverage.failed[]? | select((.item_id // .path) == $id) | .path' "$RESULT" \
-                  | grep -q . || echo "- \`$(jq -r --arg id "$id" '.manifest.coverage.selected[] | select((.item_id // .path) == $id) | .path' "$RESULT")\` — not reported in any coverage bucket"
+                jq -r --arg id "$id" '.manifest.coverage.failed[]? | select('"$ID"' == $id) | .path' "$RESULT" \
+                  | grep -q . || echo "- \`$(jq -r --arg id "$id" '.manifest.coverage.selected[] | select('"$ID"' == $id) | .path' "$RESULT")\` — not reported in any coverage bucket"
               done)
           UNREVIEWED=$(printf '%s\n%s' "$FAILED_LINES" "$UNACCOUNTED" | grep -v '^$' || true)
           # A run can declare itself partial while naming nothing — say so

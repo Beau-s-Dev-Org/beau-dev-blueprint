@@ -103,6 +103,13 @@ V1_COVERAGE_NOT_ARRAYS='{"status":"success","manifest":{"schema_version":"ocr.ru
 # file, and without `set -e` that reads as "nothing was selected" and exits green.
 V1_SELECTED_STRINGS='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":["a.py","b.py"],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 V1_ENTRY_NO_ID='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"fingerprint":"x"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+# An empty item_id beside a good path: jq's // only falls back on null/false,
+# so the empty string won and the entry vanished from the counts.
+V1_EMPTY_ID='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"","path":"a.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+# ...and the same entry, actually reviewed, must still pass.
+V1_EMPTY_ID_DONE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"","path":"a.py"}],"completed":[{"item_id":"","path":"a.py"}],"failed":[],"reused":[],"waived":[]}}}'
+# Neither identity usable at all.
+V1_BOTH_EMPTY='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"","path":""}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 V1_REUSED_STRING='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"path":"a.py"}],"completed":[{"path":"a.py"}],"failed":[],"reused":["b.py"],"waived":[]}}}'
 # A v2 result that still has a coverage OBJECT must not sneak through.
 V2_EMPTY_COVERAGE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v2","coverage":{}}}'
@@ -133,6 +140,9 @@ run_case "a v1 result with a non-array abstains"   0 "$V1_COVERAGE_NOT_ARRAYS" "
 run_case "malformed selected entries abstain"      0 "$V1_SELECTED_STRINGS" "coverage arrays missing or malformed"
 run_case "an entry with no id or path abstains"    0 "$V1_ENTRY_NO_ID"      "coverage arrays missing or malformed"
 run_case "a malformed reused entry abstains"       0 "$V1_REUSED_STRING"    "coverage arrays missing or malformed"
+run_case "an empty id falls back to the path"      1 "$V1_EMPTY_ID"         "A partial review is not an approval"
+run_case "  ...and passes when actually reviewed"  0 "$V1_EMPTY_ID_DONE"    "reviewed every item it selected"
+run_case "no usable identity at all abstains"      0 "$V1_BOTH_EMPTY"       "coverage arrays missing or malformed"
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'
