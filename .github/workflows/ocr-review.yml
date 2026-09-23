@@ -347,11 +347,23 @@ jobs:
             exit 0
           fi
 
+          # Arrays AND their contents. Checking only the array types let a
+          # malformed member through — "selected": ["a.py"] made the extraction
+          # below die with 'Cannot index string with "item_id"', and since this
+          # script deliberately runs without `set -e`, execution continued with
+          # an empty file, N_SELECTED=0, and a green exit through the
+          # empty-selection exemption. Malformed coverage became an approval.
+          # Verified before fixing.
           if ! jq -e '.manifest.coverage
                       | (.selected | type == "array")
                         and (.completed | type == "array")
-                        and (.failed | type == "array")' "$RESULT" >/dev/null 2>&1; then
-            echo "::warning::OCR result declares ${SCHEMA} but has no usable .manifest.coverage arrays; completeness could not be verified."
+                        and (.failed | type == "array")
+                        and ([.selected[], .completed[], (.reused // [])[],
+                              (.waived // [])[], .failed[]]
+                             | all(type == "object"
+                                   and ((.item_id // .path) | type == "string")))' \
+               "$RESULT" >/dev/null 2>&1; then
+            echo "::warning::OCR result declares ${SCHEMA} but its .manifest.coverage arrays are missing or contain entries without a usable item_id/path; completeness could not be verified."
             echo "⚠️ OCR completeness could not be verified (coverage arrays missing or malformed)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -364,11 +376,22 @@ jobs:
           # for: a partial run, a "skipped" run that still selected files, and
           # a manifest that quietly drops items. Identity is item_id where
           # present, path otherwise.
-          jq -r '.manifest.coverage as $c
-                 | ($c.completed + ($c.reused // []) + ($c.waived // []))
-                 | map(.item_id // .path) | .[]' "$RESULT" | sort -u > /tmp/ocr-covered.txt
-          jq -r '.manifest.coverage.selected | map(.item_id // .path) | .[]' "$RESULT" \
-            | sort -u > /tmp/ocr-selected.txt
+          # UNREACHABLE TODAY, AND KEPT ANYWAY. The shape guard above validates
+          # every entry these read, so nothing in the test suite can make them
+          # fail — mutation-checked: deleting this branch changes no test.
+          # Retained because its failure mode is the worst one available here
+          # (a dead pipeline leaves an empty file, which reads as "nothing was
+          # selected" and exits green), and because it is the only thing that
+          # would catch that if the shape guard above is ever narrowed.
+          if ! jq -r '.manifest.coverage as $c
+                      | ($c.completed + ($c.reused // []) + ($c.waived // []))
+                      | map(.item_id // .path) | .[]' "$RESULT" | sort -u > /tmp/ocr-covered.txt \
+             || ! jq -r '.manifest.coverage.selected | map(.item_id // .path) | .[]' "$RESULT" \
+                  | sort -u > /tmp/ocr-selected.txt; then
+            echo "::warning::could not read the coverage entries out of the OCR result; completeness could not be verified."
+            echo "⚠️ OCR completeness could not be verified (coverage entries unreadable)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           N_SELECTED=$(grep -c . /tmp/ocr-selected.txt || true)
           N_COVERED=$(comm -12 /tmp/ocr-selected.txt /tmp/ocr-covered.txt | grep -c . || true)
 

@@ -99,6 +99,11 @@ NO_SCHEMA='{"status":"success","manifest":{"terminal_state":"completed","coverag
 # guard is unreachable in the suite and survives being deleted.
 V1_BAD_COVERAGE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{}}}'
 V1_COVERAGE_NOT_ARRAYS='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":"a.py","completed":[],"failed":[]}}}'
+# Arrays of the wrong THING: the extraction dies, the redirect leaves an empty
+# file, and without `set -e` that reads as "nothing was selected" and exits green.
+V1_SELECTED_STRINGS='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":["a.py","b.py"],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+V1_ENTRY_NO_ID='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"fingerprint":"x"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+V1_REUSED_STRING='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"path":"a.py"}],"completed":[{"path":"a.py"}],"failed":[],"reused":["b.py"],"waived":[]}}}'
 # A v2 result that still has a coverage OBJECT must not sneak through.
 V2_EMPTY_COVERAGE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v2","coverage":{}}}'
 
@@ -125,6 +130,9 @@ run_case "a v2 schema keeping v1 arrays abstains"  0 "$V2_WITH_ARRAYS"    "unrec
 run_case "a manifest with no schema abstains"     0 "$NO_SCHEMA"         "unrecognised result schema"
 run_case "a v1 result with empty coverage abstains" 0 "$V1_BAD_COVERAGE"  "coverage arrays missing or malformed"
 run_case "a v1 result with a non-array abstains"   0 "$V1_COVERAGE_NOT_ARRAYS" "coverage arrays missing or malformed"
+run_case "malformed selected entries abstain"      0 "$V1_SELECTED_STRINGS" "coverage arrays missing or malformed"
+run_case "an entry with no id or path abstains"    0 "$V1_ENTRY_NO_ID"      "coverage arrays missing or malformed"
+run_case "a malformed reused entry abstains"       0 "$V1_REUSED_STRING"    "coverage arrays missing or malformed"
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'
