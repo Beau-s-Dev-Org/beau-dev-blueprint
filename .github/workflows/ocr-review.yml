@@ -485,11 +485,11 @@ jobs:
             | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
             | ([$c.failed[] | '"$ID"'] | unique) as $failed
             | ( [ $c.failed[]
-                  | "- \(.path // "?" | @json | .[1:-1] as $p | if ($p | test("`")) then ($p | gsub("`"; "\u0026#96;") | gsub("<"; "\u0026lt;")) else "`" + $p + "`" end) — \(.classification // "unknown" | @json | .[1:-1])"
+                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^`") or test("`$") then " " + . + " " else . end) + $f) — \(.classification // "unknown" | @json | .[1:-1])"
                     + (if .reason then ": " + (.reason | @json | .[1:-1]) else "" end) ]
               + [ $c.selected[]
                   | select(('"$ID"' | IN($cov[]) | not) and ('"$ID"' | IN($failed[]) | not))
-                  | "- \(.path // "?" | @json | .[1:-1] as $p | if ($p | test("`")) then ($p | gsub("`"; "\u0026#96;") | gsub("<"; "\u0026lt;")) else "`" + $p + "`" end) — not reported in any coverage bucket" ] )
+                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^`") or test("`$") then " " + . + " " else . end) + $f) — not reported in any coverage bucket" ] )
             | .[]' "$RESULT" || true)
           [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
 

@@ -130,6 +130,8 @@ REAL_SHAPE='{"status":"complete","manifest":{"schema_version":"ocr.run-manifest/
 MULTILINE_REASON='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a.py"}],"completed":[],"failed":[{"path":"a.py","classification":"timeout","reason":"boom\n::error::FORGED\n::add-mask::secret"}],"reused":[],"waived":[]}}}'
 # A backtick in a path would close the markdown code span early.
 NEWLINE_STATUS='{"status":"success\n::error::FORGED","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+MARKDOWN_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a`*b*.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+DOUBLE_TICK_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a``b.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 BACKTICK_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a`b.py"}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 NO_SCHEMA='{"status":"success","manifest":{"terminal_state":"complete","coverage":{"selected":[],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
 # A v1 manifest whose coverage is malformed: the schema check passes it, so
@@ -176,7 +178,9 @@ run_case "a complete review passes"                0 "$COMPLETE"          "revie
 run_case "the shape OCR actually emits passes"     0 "$REAL_SHAPE"        "reviewed every item it selected"
 run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED' 
 
-run_case "a backtick cannot break the code span"   1 "$BACKTICK_PATH"     'a&#96;b.py' 
+run_case "a backtick keeps the path verbatim"      1 "$BACKTICK_PATH"     '``a`b.py``' 
+run_case "  ...with markdown syntax beside it"      1 "$MARKDOWN_PATH"     '``a`*b*.py``'
+run_case "  ...and a doubled backtick widens it"   1 "$DOUBLE_TICK_PATH"  '```a``b.py```'
 run_case "a newline in status stays one line"      1 "$NEWLINE_STATUS"    'success\n::error::FORGED'
 run_case "an empty result file abstains"           0 ""                   "could not be verified"
 run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY"     "A partial review is not an approval"
