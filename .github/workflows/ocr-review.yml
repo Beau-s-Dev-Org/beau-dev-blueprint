@@ -318,6 +318,11 @@ jobs:
         run: |
           set -uo pipefail
           RESULT=/tmp/ocr-result.json
+          # Actions always sets this; the default exists so that if it ever is
+          # not set, `set -u` does not abort the incomplete path halfway and
+          # take the PR comment down with it. Found by enumerating the gate's
+          # states rather than by a review.
+          : "${GITHUB_STEP_SUMMARY:=/dev/null}"
 
           # The two signals below are schema-independent facts: OCR saying
           # "partial" means partial whatever shape the rest of the document is
