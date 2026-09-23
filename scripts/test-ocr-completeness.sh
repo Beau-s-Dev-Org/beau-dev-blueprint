@@ -110,6 +110,9 @@ V1_EMPTY_ID='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/
 V1_EMPTY_ID_DONE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"","path":"a.py"}],"completed":[{"item_id":"","path":"a.py"}],"failed":[],"reused":[],"waived":[]}}}'
 # Neither identity usable at all.
 V1_BOTH_EMPTY='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"","path":""}],"completed":[],"failed":[],"reused":[],"waived":[]}}}'
+# One entry's path equal to another's item_id: comparing bare strings let them
+# alias under sort -u, so two selected items counted as one.
+V1_ID_COLLISION='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"item_id":"a.py","path":"first.py"},{"item_id":"","path":"a.py"}],"completed":[{"item_id":"a.py","path":"first.py"}],"failed":[],"reused":[],"waived":[]}}}'
 V1_REUSED_STRING='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"completed","coverage":{"selected":[{"path":"a.py"}],"completed":[{"path":"a.py"}],"failed":[],"reused":["b.py"],"waived":[]}}}'
 # A v2 result that still has a coverage OBJECT must not sneak through.
 V2_EMPTY_COVERAGE='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v2","coverage":{}}}'
@@ -143,6 +146,8 @@ run_case "a malformed reused entry abstains"       0 "$V1_REUSED_STRING"    "cov
 run_case "an empty id falls back to the path"      1 "$V1_EMPTY_ID"         "A partial review is not an approval"
 run_case "  ...and passes when actually reviewed"  0 "$V1_EMPTY_ID_DONE"    "reviewed every item it selected"
 run_case "no usable identity at all abstains"      0 "$V1_BOTH_EMPTY"       "coverage arrays missing or malformed"
+run_case "a path cannot alias another item_id"     1 "$V1_ID_COLLISION"     "covered 1 of 2"
+run_case "  ...and names the real missing file"    1 "$V1_ID_COLLISION"     'OCR did not review `a.py`'
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'

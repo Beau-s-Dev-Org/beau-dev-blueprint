@@ -364,7 +364,15 @@ jobs:
           # type check passed it because "" is a string. The empty identity then
           # wrote a blank line, `grep -c .` counted zero, and the review exited
           # green through the empty-selection exemption. Verified before fixing.
-          ID='([.item_id?, .path?] | map(select(type == "string" and length > 0)) | first)'
+          # Tagged with the field it came from. item_id and path are different
+          # namespaces, so comparing the bare strings let one entry's path alias
+          # another entry's item_id: two distinct selected items collapsed under
+          # `sort -u`, and one completion then satisfied "1 of 1". Verified.
+          # (OCR's real item_ids are 64-hex digests, so this needs a pathological
+          # manifest — but the gate should not depend on that.)
+          ID='(if (.item_id? | type == "string" and length > 0) then "item_id:" + .item_id
+               elif (.path? | type == "string" and length > 0) then "path:" + .path
+               else null end)'
 
           if ! jq -e '.manifest.coverage
                       | (.selected | type == "array")
