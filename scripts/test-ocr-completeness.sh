@@ -39,7 +39,11 @@ echo "[gh] \$*" >> "$WORK/gh.log"
 # When OCR_FAKE_PRIOR_COMMENT is set, the marker lookup finds an existing
 # comment, so the clear/update path is exercised instead of short-circuiting.
 case "\$*" in
-  *issues/*/comments*--paginate*) [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ] && echo 4242 ;;
+  *issues/*/comments*--slurp*)
+    [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ] && echo 4242 ;;
+  *issues/*/comments*--paginate*)
+    # no --slurp: --jq runs per page, so a marker on two pages yields two ids
+    [ -n "\${OCR_FAKE_PRIOR_COMMENT:-}" ] && printf '101\\n4242\\n' ;;
 esac
 exit 0
 GHEOF
@@ -224,7 +228,8 @@ PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
   OCR_FAKE_PRIOR_COMMENT=1 OCR_RESULT_FILE="$WORK/result.json" \
   OCR_COMMENT_FILE="$WORK/comment.md" GITHUB_STEP_SUMMARY="$WORK/summary.md" \
   bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
-if grep -q "PATCH" "$WORK/gh.log" && grep -q "OpenCodeReview completeness" "$WORK/comment.md" 2>/dev/null; then
+if grep -q "PATCH" "$WORK/gh.log" && grep -q "OpenCodeReview completeness" "$WORK/comment.md" 2>/dev/null \
+   && grep -q "issues/comments/4242 " "$WORK/gh.log"; then
   echo "  ok    a passing rerun clears a stale failure"; PASS=$((PASS+1))
 else
   echo "  FAIL  a passing rerun left the stale failure comment"; FAIL=$((FAIL+1))

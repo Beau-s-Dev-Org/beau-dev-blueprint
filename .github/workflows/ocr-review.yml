@@ -374,8 +374,13 @@ jobs:
 
           find_gate_comment() {
             [ -n "${PR_NUMBER:-}" ] || return 0
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-              --jq "map(select(.body | contains(\"$GATE_MARKER\"))) | last | .id // empty" \
+            # --slurp, because --paginate runs --jq once PER PAGE: with a marker
+            # on two pages the substitution returned "101\n202" and the PATCH
+            # went to an endpoint containing both, failing with only a warning
+            # and leaving the stale notice up. Slurping gives one array across
+            # all pages, so `last` means the newest overall. Verified.
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --slurp \
+              --jq "(add // []) | map(select(.body | contains(\"$GATE_MARKER\"))) | last | .id // empty" \
               2>/dev/null || true
           }
 
