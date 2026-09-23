@@ -383,6 +383,10 @@ jobs:
           # non-fatal: reporting must never be able to fail a valid review.
           GATE_MARKER='<!-- ocr-completeness-gate -->'
 
+          # Every matching id, newest last — not just the newest. Duplicates are
+          # reachable whenever a lookup fails transiently: that run sees none,
+          # posts a second, and a later success used to patch only one, leaving
+          # the other permanently claiming the PR was not reviewed.
           find_gate_comment() {
             [ -n "${PR_NUMBER:-}" ] || return 0
             # --slurp, because --paginate runs --jq once PER PAGE: with a marker
@@ -399,7 +403,7 @@ jobs:
               --jq "(add // [])
                     | map(select((.user.type == \"Bot\")
                                  and (.body | contains(\"$GATE_MARKER\"))))
-                    | last | .id // empty" \
+                    | .[].id" \
               2>/dev/null || true
           }
 
@@ -409,23 +413,24 @@ jobs:
           # had said standing on the PR.
           upsert_gate_comment() {  # body already written to OCR_COMMENT_FILE
             [ -n "${PR_NUMBER:-}" ] || return 0
-            local prev
-            prev=$(find_gate_comment)
-            if [ -n "$prev" ]; then
-              gh api "repos/${REPO}/issues/comments/${prev}" --method PATCH \
+            local ids found
+            ids=$(find_gate_comment)
+            found=0
+            while IFS= read -r id; do
+              [ -n "$id" ] || continue
+              found=1
+              gh api "repos/${REPO}/issues/comments/${id}" --method PATCH \
                 --field body=@"${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
-                || echo "::warning::could not update the gate comment on PR #${PR_NUMBER}"
-            else
-              gh pr comment "$PR_NUMBER" --repo "$REPO" \
-                --body-file "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
-                || echo "::warning::could not post the gate comment to PR #${PR_NUMBER}"
-            fi
+                || echo "::warning::could not update gate comment ${id} on PR #${PR_NUMBER}"
+            done <<< "$ids"
+            [ "$found" = "1" ] && return 0
+            gh pr comment "$PR_NUMBER" --repo "$REPO" \
+              --body-file "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}" >/dev/null 2>&1 \
+              || echo "::warning::could not post the gate comment to PR #${PR_NUMBER}"
           }
 
           clear_gate_comment() {  # $1 = one-line reason this run was fine
-            local prev
-            prev=$(find_gate_comment)
-            [ -n "$prev" ] || return 0
+            [ -n "$(find_gate_comment)" ] || return 0
             {
               echo "$GATE_MARKER"
               echo "## ✅ OpenCodeReview completeness"
@@ -555,11 +560,11 @@ jobs:
             | ([($c.completed + ($c.reused // []) + ($c.waived // []))[] | '"$ID"'] | unique) as $cov
             | ([$c.failed[] | '"$ID"'] | unique) as $failed
             | ( [ $c.failed[]
-                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — \(.classification // "unknown" | @json | .[1:-1])"
+                  | "- \((if (.path? | type == "string" and length > 0) then .path elif (.item_id? | type == "string" and length > 0) then "item " + .item_id else "?" end) | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — \(.classification // "unknown" | @json | .[1:-1])"
                     + (if .reason then ": " + (.reason | @json | .[1:-1]) else "" end) ]
               + [ $c.selected[]
                   | select(('"$ID"' | IN($cov[]) | not) and ('"$ID"' | IN($failed[]) | not))
-                  | "- \(.path // "?" | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — not reported in any coverage bucket" ] )
+                  | "- \((if (.path? | type == "string" and length > 0) then .path elif (.item_id? | type == "string" and length > 0) then "item " + .item_id else "?" end) | @json | .[1:-1] | ([scan("`+")] | map(length) | max // 0) as $n | ((("`" * ($n + 1)) // "`")) as $f | $f + (if test("^[`\\s]") or test("[`\\s]$") then " " + . + " " else . end) + $f) — not reported in any coverage bucket" ] )
             | .[]' "$RESULT" || true)
           [ -n "$UNREVIEWED" ] || UNREVIEWED="- (the run reported itself incomplete without naming which items were missed)"
 
