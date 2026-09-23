@@ -165,7 +165,7 @@ run_case "a complete review passes"                0 "$COMPLETE"          "revie
 run_case "the shape OCR actually emits passes"     0 "$REAL_SHAPE"        "reviewed every item it selected"
 run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED' 
 
-run_case "a backtick cannot break the code span"   1 "$BACKTICK_PATH"     "$(printf 'a`\u200bb.py')" 
+run_case "a backtick cannot break the code span"   1 "$BACKTICK_PATH"     'a&#96;b.py' 
 run_case "a newline in status stays one line"      1 "$NEWLINE_STATUS"    'success\n::error::FORGED'
 run_case "an empty result file abstains"           0 ""                   "could not be verified"
 run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY"     "A partial review is not an approval"

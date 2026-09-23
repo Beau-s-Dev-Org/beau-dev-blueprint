@@ -75,3 +75,8 @@ jobs:
 
       - name: OCR completeness gate
         run: bash scripts/test-ocr-completeness.sh
+
+      # The audit is a report, not a pass/fail gate — but it exits non-zero when
+      # it cannot reach the step at all, which is how it broke the first time.
+      - name: OCR completeness state audit
+        run: python3 scripts/audit-ocr-completeness-states.py

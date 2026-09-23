@@ -14,18 +14,48 @@ what turned up the unset-GITHUB_STEP_SUMMARY crash, which no review had raised.
   python3 scripts/audit-ocr-completeness-states.py
 """
 
-import json, os, subprocess
+import json, os, subprocess, sys, tempfile, pathlib, shutil
+import yaml
 
-ENV = {**os.environ, "PATH": "/tmp/fb:" + os.environ["PATH"], "GH_TOKEN": "x",
+# Extract the step under test from the workflow, exactly as the test script
+# does. The first version read a fixed /tmp/step.sh that some earlier command
+# in the author's shell happened to have created — on a clean checkout every
+# case ran a nonexistent file, reported "?? rc=127", and the script still
+# exited 0. An audit for silent failure that fails silently is not an audit.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+WORKFLOW = ROOT / ".github" / "workflows" / "ocr-review.yml"
+STEP_NAME = "Fail if the review only partially ran"
+
+WORK = pathlib.Path(tempfile.mkdtemp())
+STEP = WORK / "step.sh"
+
+def _extract():
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    steps = [x for j in doc["jobs"].values() for x in j.get("steps", [])]
+    match = [x for x in steps if x.get("name") == STEP_NAME]
+    if len(match) != 1:
+        sys.exit(f"expected exactly one step named {STEP_NAME!r}, found {len(match)}")
+    STEP.write_text("#!/bin/bash\n" + match[0]["run"])
+
+_extract()
+(WORK / "bin").mkdir()
+(WORK / "bin" / "gh").write_text('#!/bin/sh\nexit 0\n')
+(WORK / "bin" / "gh").chmod(0o755)
+
+ENV = {**os.environ, "PATH": f"{WORK}/bin:" + os.environ["PATH"], "GH_TOKEN": "x",
        "PR_NUMBER": "1", "REPO": "o/r", "RUN_URL": "http://r",
-       "GITHUB_STEP_SUMMARY": "/tmp/sum.md"}
+       "OCR_RESULT_FILE": str(WORK / "result.json"),
+       "OCR_COMMENT_FILE": str(WORK / "comment.md"),
+       "GITHUB_STEP_SUMMARY": str(WORK / "summary.md")}
+
+
 def run(doc, env=None, raw=None):
-    open("/tmp/sum.md", "w").close()
-    with open("/tmp/ocr-result.json", "w") as f:
-        f.write(raw if raw is not None else json.dumps(doc))
-    r = subprocess.run(["bash", "/tmp/step.sh"], capture_output=True, text=True,
-                       env={**ENV, **(env or {})})
-    out = r.stdout + r.stderr + open("/tmp/sum.md").read()
+    (WORK / "summary.md").write_text("")
+    (WORK / "result.json").write_text(raw if raw is not None else json.dumps(doc))
+    # The same wrapper flags Actions applies to a `shell: bash` step.
+    r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(STEP)],
+                       capture_output=True, text=True, env={**ENV, **(env or {})})
+    out = r.stdout + r.stderr + (WORK / "summary.md").read_text()
     if r.returncode == 1: verdict = "FAIL (incomplete)"
     elif "could not be verified" in out: verdict = "abstain (warn)"
     elif "selected no files" in out: verdict = "pass (nothing selected)"
@@ -90,6 +120,18 @@ CASES = [
 ]
 print(f"  {'case':42} {'verdict'}")
 print("  " + "-" * 70)
+unclassified = []
 for name, kw in CASES:
     v, _ = run(kw.get("doc"), kw.get("env"), kw.get("raw"))
     print(f"  {name:42} {v}")
+    if v.startswith("??"):
+        unclassified.append(name)
+shutil.rmtree(WORK, ignore_errors=True)
+if unclassified:
+    print()
+    print(f"  {len(unclassified)} case(s) produced no recognisable verdict — the audit "
+          "did not run against the gate:")
+    for n in unclassified:
+        print(f"    - {n}")
+    sys.exit(1)
+print(f"\n  {len(CASES)} states enumerated; every one produced a recognisable verdict.")
