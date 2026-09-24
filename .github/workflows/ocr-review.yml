@@ -61,6 +61,20 @@ on:
         description: Model name at the primary endpoint (e.g. openrouter/auto)
         required: true
         type: string
+      llm_timeout_sec:
+        description: >-
+          Per-LLM-request timeout in seconds, passed to every review attempt.
+          The action's own default is 300, which classifies any file the model
+          cannot finish in that window as `timeout` — a PARTIAL review, which
+          the completeness gate below correctly refuses to call an approval.
+          Two consecutive PRs in beauzone/marketing-as-code hit this on
+          ordinary source files (a ~900-line test module), so 300 is too tight
+          for this fleet's real files rather than only for pathological ones.
+          Raise per-repo if a repo's files are larger still; note the ceiling
+          is the per-attempt step timeout, not this value.
+        required: false
+        type: string
+        default: '600'
       llm_model_fallback1:
         description: Model name at the first fallback endpoint
         required: false
@@ -100,11 +114,18 @@ on:
 jobs:
   code-review:
     runs-on: ubuntu-latest
-    # Each review attempt has its own 20-minute step timeout, so a hung LLM
-    # endpoint cannot consume the whole job budget; 65 covers three sequential
-    # attempts (3 × 20) plus overhead, guaranteeing the final fail-gate step
+    # Each review attempt has its own 30-minute step timeout, so a hung LLM
+    # endpoint cannot consume the whole job budget; 95 covers three sequential
+    # attempts (3 × 30) plus overhead, guaranteeing the final fail-gate step
     # still runs instead of being cancelled by the job timeout.
-    timeout-minutes: 65
+    #
+    # The step budget must stay comfortably ABOVE `llm_timeout_sec` (default
+    # 600). If a per-request timeout can outlast the step that contains it, a
+    # slow file stops producing a partial review — which the gate reports
+    # precisely, naming the files it skipped — and starts producing a killed
+    # step, which reports nothing useful and burns the attempt. Raising one
+    # without the other trades a legible failure for an illegible one.
+    timeout-minutes: 95
     # Declared here rather than inherited. A reusable workflow with no
     # permissions block takes the caller's, so what this job can do depended on
     # every consuming repo's stub and on repository defaults — under a
@@ -203,13 +224,14 @@ jobs:
         # fallback attempts below instead of failing the job outright; the
         # final "Fail if all review attempts failed" step restores the red X
         # when no attempt succeeds.
-        timeout-minutes: 20
+        timeout-minutes: 30
         continue-on-error: true
         uses: alibaba/open-code-review@a17e884c2bb2f460f694cf757deb2bf3d93dcd82 # v1.8.6
         with:
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ inputs.llm_model }}
+          llm_timeout: ${{ inputs.llm_timeout_sec }}
           llm_use_anthropic: 'false'
           ocr_version: '1.8.6'
           # The primary gives up its artifact too. Inside the action the step
@@ -246,13 +268,14 @@ jobs:
         if: >-
           steps.ocr-primary.outcome == 'failure'
           && env.OCR_FALLBACK1_CONFIGURED == 'true'
-        timeout-minutes: 20
+        timeout-minutes: 30
         continue-on-error: true
         uses: alibaba/open-code-review@a17e884c2bb2f460f694cf757deb2bf3d93dcd82 # v1.8.6
         with:
           llm_url: ${{ secrets.OCR_LLM_URL_FALLBACK1 }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 }}
           llm_model: ${{ inputs.llm_model_fallback1 }}
+          llm_timeout: ${{ inputs.llm_timeout_sec }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback1 || 'false' }}
           ocr_version: '1.8.6'
           # See the fallback-semantics note in the header: the primary
@@ -272,13 +295,14 @@ jobs:
           steps.ocr-primary.outcome == 'failure'
           && steps.ocr-fallback1.outcome != 'success'
           && env.OCR_FALLBACK2_CONFIGURED == 'true'
-        timeout-minutes: 20
+        timeout-minutes: 30
         continue-on-error: true
         uses: alibaba/open-code-review@a17e884c2bb2f460f694cf757deb2bf3d93dcd82 # v1.8.6
         with:
           llm_url: ${{ secrets.OCR_LLM_URL_FALLBACK2 }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 }}
           llm_model: ${{ inputs.llm_model_fallback2 }}
+          llm_timeout: ${{ inputs.llm_timeout_sec }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback2 || 'false' }}
           ocr_version: '1.8.6'
           # Same artifact-name conflict as fallback 1.
@@ -591,9 +615,11 @@ jobs:
               echo
               echo "$UNREVIEWED"
               echo
-              echo "A review that did not run is not an approval. Re-run it by commenting"
-              echo "\`/open-code-review\`, or reduce the size of the files above — \`timeout\`"
-              echo "means the file exceeded the per-file limit and will keep doing so."
+              echo "A review that did not run is not an approval. \`timeout\` means the file"
+              echo "exceeded the per-request limit (\`llm_timeout_sec\`, default 600s) and will"
+              echo "keep doing so at that limit — so re-running alone will not help those files."
+              echo "Either raise \`llm_timeout_sec\` in the caller stub, or split the file."
+              echo "For any other classification, re-run by commenting \`/open-code-review\`."
               echo
               echo "<sub>[Run log](${RUN_URL})</sub>"
             } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
