@@ -285,6 +285,7 @@ jobs:
           npm uninstall -g @alibaba-group/open-code-review >/dev/null 2>&1 || true
           ROOT="$(npm root -g)/@alibaba-group"
           rm -rf "$ROOT/open-code-review" "$ROOT"/.open-code-review-*
+          rm -f "$(npm prefix -g)/bin/ocr"
 
       - name: Run OpenCodeReview (fallback 1)
         id: ocr-fallback1
@@ -335,6 +336,7 @@ jobs:
           npm uninstall -g @alibaba-group/open-code-review >/dev/null 2>&1 || true
           ROOT="$(npm root -g)/@alibaba-group"
           rm -rf "$ROOT/open-code-review" "$ROOT"/.open-code-review-*
+          rm -f "$(npm prefix -g)/bin/ocr"
 
       - name: Run OpenCodeReview (fallback 2)
         id: ocr-fallback2
@@ -754,17 +756,25 @@ jobs:
               : "no OpenCodeReview attempt succeeded";
             const copilotLogin = "copilot-pull-request-reviewer[bot]";
             try {
+              const { data: pr } = await github.rest.pulls.get({
+                owner, repo, pull_number: prNumber,
+              });
               const { data: requested } = await github.rest.pulls.listRequestedReviewers({
                 owner, repo, pull_number: prNumber,
               });
               const reviews = await github.paginate(github.rest.pulls.listReviews, {
                 owner, repo, pull_number: prNumber, per_page: 100,
               });
+              // Skip only when Copilot is already pending, or has reviewed THIS
+              // head commit. A Copilot review of an earlier commit says nothing
+              // about the commit OCR just failed on (Codex pre-PR review).
               if (
                 requested.users.some((u) => u.login === copilotLogin) ||
-                reviews.some((r) => r.user && r.user.login === copilotLogin)
+                reviews.some(
+                  (r) => r.user && r.user.login === copilotLogin && r.commit_id === pr.head.sha
+                )
               ) {
-                core.info("Copilot is already a reviewer on this PR; not re-requesting.");
+                core.info("Copilot is already reviewing (or has reviewed) this commit; not re-requesting.");
                 return;
               }
               try {
