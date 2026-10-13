@@ -79,6 +79,15 @@ on:
         required: false
         type: string
         default: '1200'
+      copilot_fallback:
+        description: >-
+          When no review attempt produces a complete review, request a GitHub
+          Copilot code review on the PR as a BACKUP signal. Advisory only: it
+          never turns this check green and is not an approval. Set to 'false'
+          in a repo without Copilot code review.
+        required: false
+        type: string
+        default: 'true'
       llm_model_fallback1:
         description: Model name at the first fallback endpoint
         required: false
@@ -259,6 +268,24 @@ jobs:
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
+      - name: Clear the previous attempt's OCR install (before fallback 1)
+        # The action runs `npm install -g` on every attempt. A second global
+        # install of the same package on the same runner intermittently dies
+        # with ENOTEMPTY when npm renames the existing directory aside, so the
+        # fallback never reaches its LLM call (beauzone/mac-mcp-server run
+        # 38345226012, 2026-10-13: primary failed, fallback 1 failed in
+        # "Install OpenCodeReview" after 0.4s). Removing the first install —
+        # and any half-renamed `.open-code-review-*` sibling — gives the
+        # fallback a clean install.
+        if: >-
+          steps.ocr-primary.outcome == 'failure'
+          && env.OCR_FALLBACK1_CONFIGURED == 'true'
+        shell: bash
+        run: |
+          npm uninstall -g @alibaba-group/open-code-review >/dev/null 2>&1 || true
+          ROOT="$(npm root -g)/@alibaba-group"
+          rm -rf "$ROOT/open-code-review" "$ROOT"/.open-code-review-*
+
       - name: Run OpenCodeReview (fallback 1)
         id: ocr-fallback1
         # Runs only when the primary attempt failed AND a first fallback
@@ -290,6 +317,25 @@ jobs:
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
+      - name: Clear the previous attempt's OCR install (before fallback 2)
+        # The action runs `npm install -g` on every attempt. A second global
+        # install of the same package on the same runner intermittently dies
+        # with ENOTEMPTY when npm renames the existing directory aside, so the
+        # fallback never reaches its LLM call (beauzone/mac-mcp-server run
+        # 38345226012, 2026-10-13: primary failed, fallback 1 failed in
+        # "Install OpenCodeReview" after 0.4s). Removing the first install —
+        # and any half-renamed `.open-code-review-*` sibling — gives the
+        # fallback a clean install.
+        if: >-
+          steps.ocr-primary.outcome == 'failure'
+          && steps.ocr-fallback1.outcome != 'success'
+          && env.OCR_FALLBACK2_CONFIGURED == 'true'
+        shell: bash
+        run: |
+          npm uninstall -g @alibaba-group/open-code-review >/dev/null 2>&1 || true
+          ROOT="$(npm root -g)/@alibaba-group"
+          rm -rf "$ROOT/open-code-review" "$ROOT"/.open-code-review-*
+
       - name: Run OpenCodeReview (fallback 2)
         id: ocr-fallback2
         # Runs only when the primary failed, fallback 1 did not succeed
@@ -315,6 +361,7 @@ jobs:
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
       - name: Fail if the review only partially ran
+        id: completeness
         # OCR exits 0 when it reviewed SOME of the files it selected. Its own
         # result then reads:
         #
@@ -662,3 +709,88 @@ jobs:
           # failed". State what is known and point at where the cause is.
           echo "::error::No OCR review attempt succeeded (primary: ${PRIMARY_OUTCOME}, fallback1: ${FALLBACK1_OUTCOME}, fallback2: ${FALLBACK2_OUTCOME}). This reports the *step* outcomes, which cover every stage of the review action, not the LLM call alone — open the failing attempt's log and read its last error before assuming a backend outage."
           exit 1
+
+      - name: Request a Copilot review as a backup (advisory only)
+        # Runs when no attempt produced a COMPLETE review: every attempt
+        # failed, or the one that succeeded covered only some files. Ported
+        # from the per-repo workaround in beauzone/mac-mcp-server
+        # (ocr-fallback-copilot-review.yml) so every consuming repo gets it.
+        #
+        # BACKUP ONLY. The steps above have already failed this job, and
+        # nothing here changes that: the check stays red, so every consuming
+        # repo's merge policy ("a review that never ran is not approval")
+        # still holds the PR for a human. Copilot's comments are supplementary
+        # signal for that human, not a substitute gate. Its comments carry no
+        # P1/P2 severity, which those policies key on.
+        #
+        # Every API failure here is a warning, never a job failure: this step
+        # must not mask or replace the real reason the job is red.
+        if: >-
+          !cancelled()
+          && inputs.copilot_fallback != 'false'
+          && (
+            steps.completeness.outcome == 'failure'
+            || (
+              steps.ocr-primary.outcome != 'success'
+              && steps.ocr-fallback1.outcome != 'success'
+              && steps.ocr-fallback2.outcome != 'success'
+            )
+          )
+        uses: actions/github-script@v9
+        env:
+          # BEA-327: never interpolate a context value into a script body.
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PARTIAL: ${{ steps.completeness.outcome == 'failure' }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!prNumber) {
+              core.info("No PR number in this event; nothing to do.");
+              return;
+            }
+            const reason = process.env.PARTIAL === "true"
+              ? "OpenCodeReview finished only part of the files it selected"
+              : "no OpenCodeReview attempt succeeded";
+            const copilotLogin = "copilot-pull-request-reviewer[bot]";
+            try {
+              const { data: requested } = await github.rest.pulls.listRequestedReviewers({
+                owner, repo, pull_number: prNumber,
+              });
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner, repo, pull_number: prNumber, per_page: 100,
+              });
+              if (
+                requested.users.some((u) => u.login === copilotLogin) ||
+                reviews.some((r) => r.user && r.user.login === copilotLogin)
+              ) {
+                core.info("Copilot is already a reviewer on this PR; not re-requesting.");
+                return;
+              }
+              try {
+                await github.rest.pulls.requestReviewers({
+                  owner, repo, pull_number: prNumber, reviewers: [copilotLogin],
+                });
+              } catch (err) {
+                core.warning(`Could not request Copilot as a reviewer: ${err.message}`);
+              }
+              const { data: after } = await github.rest.pulls.listRequestedReviewers({
+                owner, repo, pull_number: prNumber,
+              });
+              const attached = after.users.some((u) => u.login === copilotLogin);
+
+              const marker = "<!-- ocr-copilot-backup -->";
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: prNumber, per_page: 100,
+              });
+              if (!attached && comments.some((c) => c.body && c.body.includes(marker))) {
+                core.info("Already posted a could-not-attach note on this PR; not repeating it.");
+                return;
+              }
+              const body = attached
+                ? `${marker}\n🤖 **Copilot backup review requested**: ${reason}. Copilot has been added as a reviewer so this PR still gets an automated pass.\n\n**This is a backup, not an approval.** The OpenCodeReview check stays red, and the PR needs a human decision (or a clean OCR re-run via \`/open-code-review\`) before it can merge.`
+                : `${marker}\n⚠️ **Copilot backup wanted, but could not attach**: ${reason}. Copilot was not added as a reviewer — Copilot code review is probably not enabled for this repository (Settings → Copilot → Code review), or set \`copilot_fallback: 'false'\` in the caller stub to stop trying. Re-run OCR with \`/open-code-review\`.`;
+              await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+            } catch (err) {
+              core.warning(`Copilot backup step could not complete: ${err.message}`);
+            }
