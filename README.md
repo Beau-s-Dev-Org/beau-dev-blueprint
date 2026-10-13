@@ -19,7 +19,14 @@ to every repo on its next run.
 
 **Inputs:** `llm_model` (required), `llm_model_fallback1`/`llm_model_fallback2`,
 `llm_use_anthropic_fallback1`/`llm_use_anthropic_fallback2` (`'true'` only for
-Anthropic's API).
+Anthropic's API), `copilot_fallback` (default `'true'`).
+
+**Copilot backup.** When no attempt produces a complete review (every attempt
+failed, or the one that ran skipped files), the workflow requests a GitHub
+Copilot code review on the PR and comments to say so. This is a **backup, not
+an approval**: the OCR check stays red, so the PR still needs a human decision
+or a clean `/open-code-review` re-run. Set `copilot_fallback: 'false'` in a
+repo without Copilot code review enabled.
 
 **Secrets:** `OCR_LLM_URL` + `OCR_LLM_AUTH_TOKEN` (required),
 `OCR_LLM_URL_FALLBACK1`/`OCR_LLM_URL_FALLBACK2` +
