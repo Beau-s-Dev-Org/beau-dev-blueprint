@@ -411,6 +411,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The value actually used, so the notice below cannot drift from it.
+          LLM_TIMEOUT_SEC: ${{ inputs.llm_timeout_sec }}
         run: |
           set -uo pipefail
           # Overridable so the test harness can run hermetically; unchanged in
@@ -678,9 +680,11 @@ jobs:
               echo "$UNREVIEWED"
               echo
               echo "A review that did not run is not an approval. \`timeout\` means the file"
-              echo "exceeded the per-request limit (\`llm_timeout_sec\`, default 2400s) and will"
-              echo "keep doing so at that limit — so re-running alone will not help those files."
-              echo "Either raise \`llm_timeout_sec\` in the caller stub, or split the file."
+              echo "hit a time limit and will keep doing so — re-running alone will not help."
+              echo "Two limits apply: the per-request limit (\`llm_timeout_sec\` = ${LLM_TIMEOUT_SEC:-?}s,"
+              echo "at most 2700s under the 50-minute attempt step) and OCR's own per-file task"
+              echo "deadline (10 minutes at the pinned v1.8.6, not settable from this workflow)."
+              echo "Raising \`llm_timeout_sec\` cannot help past that deadline; splitting the file can."
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"
               echo "the action does not expose); a re-run often finishes, and a smaller file helps."
               echo "For any other classification, re-run by commenting \`/open-code-review\`."
