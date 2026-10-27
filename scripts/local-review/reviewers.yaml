@@ -37,9 +37,11 @@ reviewers:
     multi_provider: true
     model: ''
     enabled: true
-  # Cursor can run several families, so each family is its own entry with an
-  # explicit model. Disabled until this account has models available
-  # (`cursor-agent models` listed none on 2026-10-26).
+  # Cursor can run several families, so each family is its own entry, and
+  # each needs a `model` of that family set BEFORE it is enabled: with an
+  # empty model Cursor runs its own default, and a review on the wrong family
+  # is discarded by `verdict`, costing a round. Disabled until this account
+  # has models available (`cursor-agent models` listed none on 2026-10-26).
   - id: cursor-openai
     family: openai
     agent: cursor

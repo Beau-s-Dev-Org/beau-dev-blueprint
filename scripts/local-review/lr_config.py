@@ -12,6 +12,8 @@ import yaml
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = os.path.join(HERE, "reviewers.yaml")
 CONFIG_SCHEMA = "local-review-config/v1"
+TOP_KEYS = {"schema", "families", "reviewers", "hold_paths", "max_rounds"}
+REVIEWER_KEYS = {"id", "family", "agent", "model", "enabled", "multi_provider"}
 RESULT_SCHEMA = "local-review-result/v1"
 SEVERITIES = ("P1", "P2", "P3")
 BLOCKING = ("P1", "P2")
@@ -67,6 +69,11 @@ def load_config(path):
         raise UsageError(f"cannot parse config {path}: {exc}") from exc
     if not isinstance(cfg, dict) or cfg.get("schema") != CONFIG_SCHEMA:
         raise UsageError(f"config {path} is not {CONFIG_SCHEMA}")
+    # Unknown keys are errors, not ignored: a typo such as `hold_path:` would
+    # otherwise read as "no hold paths" and quietly weaken the gate.
+    unknown = set(cfg) - TOP_KEYS
+    if unknown:
+        raise UsageError(f"config {path} has unknown key(s) {', '.join(sorted(map(str, unknown)))}")
 
     # Every field is type-checked before it is used. A wrong-typed value used
     # to reach a regex call or a set lookup and raise TypeError, which exits 1:
@@ -90,6 +97,10 @@ def load_config(path):
     for r in reviewers:
         if not isinstance(r, dict) or not isinstance(r.get("id"), str) or not r["id"]:
             raise UsageError(f"reviewer entry without an id: {r!r}")
+        unknown = set(r) - REVIEWER_KEYS
+        if unknown:
+            # e.g. `multiprovider: true` would skip the family/model cross-check.
+            raise UsageError(f"reviewer {r['id']} has unknown key(s) {', '.join(sorted(map(str, unknown)))}")
         if r["id"] in seen:
             raise UsageError(f"duplicate reviewer id {r['id']}")
         seen.add(r["id"])

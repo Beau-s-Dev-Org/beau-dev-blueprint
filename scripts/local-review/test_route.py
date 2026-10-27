@@ -290,6 +290,18 @@ reviewers:
             self.assertEqual(code, 2, entry)
             self.assertIn("reviewer c", err, entry)
 
+    def test_config_rejects_unknown_keys(self):
+        # A typo must not read as a missing key and quietly weaken the gate.
+        code, _, err = self.run_cli("--config", self.config(
+            self.BASE.replace("hold_paths: []", "hold_path: ['^x/']")
+            + "  - {id: c, family: openai, agent: codex, enabled: true}\n"),
+            "unavailable", "--reason", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown key(s) hold_path", err)
+        code, err = self.load("  - {id: c, family: google, agent: cursor, multiprovider: true, enabled: true}\n")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown key(s) multiprovider", err)
+
     def test_config_rejects_an_empty_family_pattern(self):
         for pat in ("''", "'  '"):
             text = self.BASE.replace("anthropic: 'claude'", f"anthropic: {pat}") \
