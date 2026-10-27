@@ -134,6 +134,17 @@ flags() {  # $1 llm, $2 task, $3 files, $4 label, $5 expected "task llm" flags
 flags 1200 25 2  "nothing shortened on a small PR"              "false false"
 flags 300  25 11 "deadline shortened, short request kept"       "true false"
 flags 1200 25 11 "deadline and request both shortened"          "true true"
+ceiling() {  # $1 task, $2 files, $3 label, $4 expected task_ceiling
+  : > "$WORK/gh_out"
+  LLM_TIMEOUT_SEC=300 TASK_TIMEOUT_MIN="$1" CHANGED_FILES="$2" GITHUB_OUTPUT="$WORK/gh_out" \
+    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
+  local rc=$? got; got=$(sed -n 's/^task_ceiling=//p' "$WORK/gh_out")
+  if [ "$rc" -eq 0 ] && [ "$got" = "$4" ]; then pass=$((pass+1)); echo "  ok    $3"
+  else fail=$((fail+1)); echo "  FAIL  $3 (rc $rc, ceiling '$got', expected '$4')"; fi
+}
+ceiling 25 3   "ceiling is 25 on a small PR"                       25
+ceiling 10 9   "a deadline configured AT the size cap: ceiling 10"  10
+ceiling 25 201 "ceiling never drops below the 1-minute floor"      1
 
 : > "$WORK/gh_out"
 LLM_TIMEOUT_SEC=1200 TASK_TIMEOUT_MIN=25 CHANGED_FILES=1 GITHUB_OUTPUT="$WORK/gh_out" \

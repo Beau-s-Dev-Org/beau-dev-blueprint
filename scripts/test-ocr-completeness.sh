@@ -323,12 +323,12 @@ fi
 # One case per state the limits step can hand over (Codex, PR #74): headroom
 # on the deadline, headroom on the request only, both at the ceiling on a
 # small PR, and shortened to fit a large one.
-advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must_not[, configured_min]
+advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must_not[, configured_min[, ceiling]]
   # configured defaults to the deadline: an unshortened deadline IS the configured one.
   : > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
   PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
     OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
-    GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN="${8:-$2}" \
+    GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN="${8:-$2}" TASK_CEILING="${9:-25}" \
     TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" TASK_SHORTENED="$4" LLM_SHORTENED="$5" \
     bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
   if grep -qF "$6" "$WORK/comment.md" && ! grep -qF "$7" "$WORK/comment.md"; then
@@ -343,14 +343,20 @@ advice "advice: both with room offers both"           20 300 false false \
   'and/or `llm_timeout_sec`' 'already at their ceiling'
 advice "advice: only the request has room"             25 1200 false false \
   'Raise `llm_timeout_sec`, up to 1500s' 'Raise `review_task_timeout_min`'
+advice "advice: deadline configured at the size cap says split" 10 600 false false \
+  'most this PR' 'Raise `' 10 10
+advice "  ...and with request room offers only the request" 10 300 false false \
+  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 10 10
+advice "advice: below a size cap offers up to the cap" 7 300 false false \
+  '(at most 10)' 'already at their ceiling' 7 10
 advice "advice: both at the ceiling says split"        25 1500 false false \
   'already at their ceiling' 'Raise `'
 advice "advice: shortened deadline, request has room"  10 300 true false \
-  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 25
+  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 25 10
 advice "advice: shortened and full says split"         10 600 true true \
-  'already at their ceiling' 'Raise `' 25
+  'already at their ceiling' 'Raise `' 25 10
 advice "  ...and says the deadline was shortened"      10 600 true true \
-  '25 min), so raising' 'Raise `' 25
+  '25 min), so raising' 'Raise `' 25 10
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

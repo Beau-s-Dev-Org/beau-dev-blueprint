@@ -340,6 +340,10 @@ jobs:
           WAVES=$(( (N + 7) / 8 ))
           GROUPING=0; (( N >= 4 )) && GROUPING=1   # one grouping request first
           TASK=$(( 50 / (WAVES * ROUNDS + GROUPING) ))
+          # The most any setting could give this PR: the size-derived cap,
+          # itself capped at 25. Equal to TASK when the configured value
+          # happens to match it, which is still no headroom.
+          CEIL=$TASK; (( CEIL > 25 )) && CEIL=25; (( CEIL < 1 )) && CEIL=1
           (( TASK > TASK_TIMEOUT_MIN )) && TASK=$TASK_TIMEOUT_MIN
           if (( TASK < 1 )); then
             # The count includes files OCR never selects (deletions, Markdown,
@@ -369,6 +373,7 @@ jobs:
           # only recommends raising a setting that would take effect.
           echo "task_shortened=$( (( TASK < TASK_TIMEOUT_MIN )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
           echo "llm_shortened=$( (( LLM < LLM_TIMEOUT_SEC )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          echo "task_ceiling=${CEIL}" >> "$GITHUB_OUTPUT"
           echo "Review time limits: ${N} changed files, ${WAVES} wave(s) x ${ROUNDS} rounds; ${LLM}s per request, ${TASK} min per file per round, 60 min per attempt."
 
       - name: Run OpenCodeReview (primary)
@@ -575,6 +580,7 @@ jobs:
           TASK_TIMEOUT_MIN: ${{ steps.limits.outputs.task_minutes }}
           CONFIGURED_TASK_MIN: ${{ inputs.review_task_timeout_min }}
           TASK_SHORTENED: ${{ steps.limits.outputs.task_shortened }}
+          TASK_CEILING: ${{ steps.limits.outputs.task_ceiling }}
           LLM_SHORTENED: ${{ steps.limits.outputs.llm_shortened }}
         run: |
           set -uo pipefail
@@ -847,12 +853,15 @@ jobs:
               echo "This run allowed ${TASK_TIMEOUT_MIN:-?} min per file per review round and"
               echo "${LLM_TIMEOUT_SEC:-?}s per request."
               # Recommend only a raise that would take effect. One rule for
-              # every case: a setting has headroom when it ran as configured
-              # (not shortened to fit the PR) and is below its own ceiling,
-              # 25 min for the deadline and 60 x the deadline for a request.
+              # every case: a setting has headroom when it is below its own
+              # ceiling for this PR. The deadline's is the limits step's
+              # task_ceiling (25, or less on a larger PR), not the configured
+              # value: a deadline configured exactly at the size cap has none.
+              # The request's is 60 x the deadline, unless it was clamped.
               # Neither with headroom means a raise cannot help: split.
+              CEIL=${TASK_CEILING:-25}
               TASK_ROOM=; LLM_ROOM=
-              if [ "${TASK_SHORTENED:-}" != "true" ] && (( ${TASK_TIMEOUT_MIN:-25} < 25 )); then
+              if (( ${TASK_TIMEOUT_MIN:-25} < CEIL )); then
                 TASK_ROOM=1
               fi
               if [ "${LLM_SHORTENED:-}" != "true" ] \
@@ -862,14 +871,17 @@ jobs:
               if [ "${TASK_SHORTENED:-}" = "true" ]; then
                 echo "The per-file limit was shortened to fit this PR's size (configured:"
                 echo "${CONFIGURED_TASK_MIN:-?} min), so raising \`review_task_timeout_min\` will not help."
+              elif [ -z "$TASK_ROOM" ] && (( CEIL < 25 )); then
+                echo "${CEIL} min is the most this PR's size allows per file, so raising"
+                echo "\`review_task_timeout_min\` will not help."
               fi
               # A `timeout` does not say which limit fired, so when both have
               # headroom, both are offered.
               if [ -n "$TASK_ROOM" ] && [ -n "$LLM_ROOM" ]; then
-                echo "Either limit can be the one that fired: raise \`review_task_timeout_min\` (at most 25)"
+                echo "Either limit can be the one that fired: raise \`review_task_timeout_min\` (at most ${CEIL})"
                 echo "and/or \`llm_timeout_sec\` (up to 60 × the deadline), or split the file."
               elif [ -n "$TASK_ROOM" ]; then
-                echo "Raise \`review_task_timeout_min\` (at most 25); \`llm_timeout_sec\` can then go"
+                echo "Raise \`review_task_timeout_min\` (at most ${CEIL}); \`llm_timeout_sec\` can then go"
                 echo "up to 60 × the new deadline. Or split the file."
               elif [ -n "$LLM_ROOM" ]; then
                 echo "Raise \`llm_timeout_sec\`, up to $(( ${TASK_TIMEOUT_MIN:-0} * 60 ))s, or split the PR or the slow files."
