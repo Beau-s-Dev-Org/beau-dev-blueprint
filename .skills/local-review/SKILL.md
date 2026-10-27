@@ -29,6 +29,27 @@ override its answer, re-grade a finding, or count a review it rejected.
   rounds (the repeated-patch rule in the blueprint's CLAUDE.md). Escalate with the
   open findings, the options, and a recommendation.
 
+## Prerequisites
+
+Both found by running this skill for real (2026-10-26):
+
+- **The repo is registered in Orca** (`orca repo list --json`). If it isn't, Orca
+  cannot start agents in it: `worker-start` and `agent launch` fail with
+  `selector_not_found`. Registering it changes Beau's Orca setup, so ask him
+  first, then run `orca repo add`.
+- **The coordinator runs inside an Orca terminal.** Orchestration commands
+  issued from anywhere else (the Claude desktop app, a plain shell) fail with
+  `no_active_sender_terminal`. If you are not in one, do not coordinate from
+  where you are. Launch a coordinator into the branch's worktree instead, and
+  wait for its report:
+
+  ```text
+  orca agent launch --agent claude --worktree path:<worktree> --surface terminal --prompt "<follow this skill for branch X; author family Y; report to <RESULTS>/coordinator-report.md>" --json
+  ```
+
+  The coordinator's own family does not matter. It routes and fixes, it does
+  not review.
+
 ## Setup, once per session
 
 ```bash
