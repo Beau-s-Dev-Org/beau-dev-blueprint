@@ -2,10 +2,10 @@
 #
 # Tests the "Check review time limits" step of the reusable OCR workflow.
 #
-# That step refuses caller-stub limits that do not nest (a request longer than
-# its file's task deadline, or a task deadline two waves of which cannot fit
-# the attempt step), which would otherwise get the step killed with no review
-# report. Like test-ocr-completeness.sh, the step body is extracted from the
+# That step clamps caller-stub limits so they nest (the task deadline at most
+# 25 minutes, the request at most that deadline), so the grouping request plus
+# two review rounds fit the 85-minute attempt step instead of getting it
+# killed with no review report. Like test-ocr-completeness.sh, the step body is extracted from the
 # workflow, so the thing under test is the thing that ships.
 #
 # Run:  bash scripts/test-ocr-limits.sh
@@ -77,18 +77,17 @@ if (len(report) != 1
     sys.exit("the limits step's error output is no longer posted to the PR")
 for s in attempts:
     # Gated explicitly, so a failed limits step cannot run an attempt with
-    # empty inputs; and 60 minutes each, the budget the body's 50-minute
-    # split and the expectations below all assume.
-    # Leading clause and no ||: a substring check would accept
+    # empty inputs. Leading clause and no ||: a substring check would accept
     # "... == 'success' || always()", which bypasses the guard.
     cond = " ".join(str(s.get("if", "")).replace("${{", "").replace("}}", "").split())
     if not cond.startswith("steps.limits.outcome == 'success'") or "||" in cond:
         sys.exit(f"attempt {s.get('name')!r} is not gated on the limits step succeeding")
-    # 80: the grouping request (at most one 25-minute deadline) plus two
-    # rounds of 25, with room for install and posting. The step body's
-    # 25-minute cap is what this assumes.
-    if s.get("timeout-minutes") != 80:
-        sys.exit(f"attempt {s.get('name')!r} has timeout-minutes {s.get('timeout-minutes')!r}, not 80")
+    # 85: the grouping request (at most one 25-minute deadline) plus two
+    # rounds of 25 = 75, plus 10 for checkout, install and posting, which all
+    # run inside the attempt step. The step body's 25-minute cap is what this
+    # assumes.
+    if s.get("timeout-minutes") != 85:
+        sys.exit(f"attempt {s.get('name')!r} has timeout-minutes {s.get('timeout-minutes')!r}, not 85")
     w = s.get("with") or {}
     if (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
             or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"
@@ -128,39 +127,21 @@ read -r DEF_LLM DEF_TASK < "$WORK/defaults"
 check 0 "$DEF_LLM" "$DEF_TASK" "shipped defaults pass ($DEF_LLM s, $DEF_TASK min)" "" "$DEF_TASK $DEF_LLM"
 # Annotations land on every consuming PR, so their ABSENCE at the defaults is
 # pinned too: an unconditional one would pass every case below.
-check 0 1200 25 "the defaults raise no warning" "" "" "::warning::"
-check 0 1200 25 "the defaults emit no notice"   "" "" "::notice::"
+check 0 "$DEF_LLM" "$DEF_TASK" "the defaults raise no warning" "" "" "::warning::"
+check 0 "$DEF_LLM" "$DEF_TASK" "the defaults emit no notice"   "" "" "::notice::"
 
 # The deadline is the configured value capped at 25, whatever the PR's size:
 # OCR bundles files into groups, and the group count is not known in advance.
-check 0 1200 25 "the configured deadline is used as is"        "80 min per attempt" "25 1200"
+check 0 1200 25 "the configured deadline is used as is"        "85 min per attempt" "25 1200"
 check 0 600  10 "a lower configured deadline is kept"          "" "10 600"
 check 0 300  25 "a request below the deadline is kept"         "" "25 300"
 check 0 1501 25 "a request longer than its deadline is clamped, with a warning" "it is clamped to that deadline" "25 1500"
 check 0 1200 26 "a deadline over 25 is clamped, with a warning" "using at most 25" "25 1200"
+check 0 1560 26 "a request is clamped against the CAPPED deadline, with a warning" "it is clamped to that deadline" "25 1500"
 check 0 3000 30 "an older stub with higher settings still gets a review" "::warning::" "25 1500"
 check 0 1200 10 "a request over a lower deadline is clamped to it" "" "10 600"
 check 1 01200 25 "rejects a zero-padded request timeout"       "LLM_TIMEOUT_SEC must be a positive integer"
 check 1 1200 025 "rejects a zero-padded deadline"              "TASK_TIMEOUT_MIN must be a positive integer"
-
-# Whether the request limit was clamped, for the notice's advice.
-flags() {  # $1 llm, $2 task, $3 label, $4 expected llm_shortened
-  : > "$WORK/gh_out"
-  LLM_TIMEOUT_SEC="$1" TASK_TIMEOUT_MIN="$2" GITHUB_OUTPUT="$WORK/gh_out" \
-    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
-  local rc=$? got
-  # Flags written before a later failure would pass here while production
-  # skipped every attempt.
-  if [ "$rc" -ne 0 ]; then
-    fail=$((fail+1)); echo "  FAIL  $3 (step exited $rc)"; sed 's/^/        /' "$WORK/out"; return
-  fi
-  got=$(sed -n 's/^llm_shortened=//p' "$WORK/gh_out")
-  if [ "$got" = "$4" ]; then pass=$((pass+1)); echo "  ok    $3"
-  else fail=$((fail+1)); echo "  FAIL  $3 (llm_shortened '$got', expected '$4')"; fi
-}
-flags 1200 25 "a request inside the deadline is not shortened" false
-flags 1500 25 "a request exactly at the deadline is not shortened" false
-flags 1200 10 "a request over the deadline is shortened"       true
 
 : > "$WORK/gh_out"
 LLM_TIMEOUT_SEC=1200 TASK_TIMEOUT_MIN=25 GITHUB_OUTPUT="$WORK/gh_out" \
@@ -171,12 +152,21 @@ if [ "$rc" -eq 0 ] && grep -qx "effort=medium" "$WORK/gh_out"; then
 else
   fail=$((fail+1)); echo "  FAIL  effort output is not 'medium'"; sed 's/^/        /' "$WORK/out"
 fi
-# The removed size-derived outputs must stay gone: a consumer still reading
-# one would get an empty value.
-if ! grep -qE '^(task_shortened|task_ceiling)=' "$WORK/gh_out"; then
-  pass=$((pass+1)); echo "  ok    no size-derived outputs"
+# The removed outputs must stay gone: a consumer still reading one would get
+# an empty value. Checked in the step body, so a branch that only some inputs
+# reach cannot hide one, and on a clamping run too.
+if ! grep -qE '(task_shortened|task_ceiling|llm_shortened)=' "$WORK/step.sh"; then
+  pass=$((pass+1)); echo "  ok    the step body writes no removed output"
 else
-  fail=$((fail+1)); echo "  FAIL  a size-derived output is still written"; sed 's/^/        /' "$WORK/gh_out"
+  fail=$((fail+1)); echo "  FAIL  the step body still writes a removed output"
+fi
+: > "$WORK/gh_out"
+LLM_TIMEOUT_SEC=3000 TASK_TIMEOUT_MIN=30 GITHUB_OUTPUT="$WORK/gh_out" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
+if [ "$?" -eq 0 ] && [ "$(cut -d= -f1 "$WORK/gh_out" | sort | tr '\n' ' ')" = "effort llm_timeout_sec task_minutes " ]; then
+  pass=$((pass+1)); echo "  ok    a clamping run writes exactly the three outputs"
+else
+  fail=$((fail+1)); echo "  FAIL  a clamping run's outputs changed"; sed 's/^/        /' "$WORK/gh_out"
 fi
 
 # A failure also writes its reason as an output, newline-free.

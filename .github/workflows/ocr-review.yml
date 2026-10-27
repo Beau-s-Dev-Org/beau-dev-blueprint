@@ -103,7 +103,7 @@ on:
           10. The deadline applies per review round (effort is pinned to
           medium, 2 rounds), so one round of up to 8 concurrent groups takes
           at most 25 × 2 minutes, after a grouping request of at most one
-          deadline: 75 minutes inside the 80-minute attempt.
+          deadline: 75 minutes inside the 85-minute attempt.
 
           It is no longer shortened by PR size. #74 cut it by the changed-file
           count, assuming one task per file; on #73 (15 files, 2026-10-27) all
@@ -161,9 +161,9 @@ on:
 jobs:
   code-review:
     runs-on: ubuntu-latest
-    # Each review attempt has its own 80-minute step timeout, so a hung LLM
-    # endpoint cannot consume the whole job budget; 270 covers three sequential
-    # attempts (3 × 80) plus a 30-minute reserve. The other eight steps (PR
+    # Each review attempt has its own 85-minute step timeout, so a hung LLM
+    # endpoint cannot consume the whole job budget; 285 covers three sequential
+    # attempts (3 × 85) plus a 30-minute reserve. The other eight steps (PR
     # context, the limits check, two install cleanups, the completeness gate,
     # the limits notice, the fail-gate and the Copilot step) each have their
     # own timeout-minutes, summing to 22, so the reserve is enforced rather
@@ -173,13 +173,15 @@ jobs:
     #
     # Nesting, enforced by "Check review time limits": the request timeout fits
     # in the per-task deadline, and the grouping request plus one round of
-    # concurrent groups (25 + 2 × 25 = 75 minutes) fits in the 80-minute step.
+    # concurrent groups (25 + 2 × 25 = 75 minutes) fits in the 85-minute step,
+    # leaving the same 10 minutes the 60-minute design kept for checkout, the
+    # action's npm install and posting comments, all inside that step.
     # If a limit can outlast the step that contains it, a slow group stops
     # producing a partial review — which the gate reports precisely, naming
     # the files it skipped — and starts producing a killed step, which reports
     # nothing useful and burns the attempt. Raising one without the other
     # trades a legible failure for an illegible one.
-    timeout-minutes: 270
+    timeout-minutes: 285
     # Declared here rather than inherited. A reusable workflow with no
     # permissions block takes the caller's, so what this job can do depended on
     # every consuming repo's stub and on repository defaults — under a
@@ -290,7 +292,7 @@ jobs:
         # grouping request runs before any task clock and is bounded by the
         # request timeout, which is clamped to the deadline. So at the 25-minute
         # cap one attempt needs at most 25 + 2 × 25 = 75 minutes for up to 8
-        # groups, inside the 80-minute attempt step.
+        # groups, inside the 85-minute attempt step.
         #
         # The deadline is NOT shortened by PR size. #74 did that from the
         # changed-file count, assuming a task per file; on #73 the 8 selected
@@ -321,24 +323,23 @@ jobs:
           # 25, the request never exceeds the deadline), so they warn rather
           # than fail: an older stub that raised them keeps getting a review.
           if (( TASK_TIMEOUT_MIN > 25 )); then
-            echo "::warning::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; using at most 25 (the grouping request plus 2 review rounds must fit the 80-minute attempt)."
-          fi
-          if (( LLM_TIMEOUT_SEC > TASK_TIMEOUT_MIN * 60 )); then
-            echo "::warning::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute task deadline that contains it; it is clamped to that deadline."
+            echo "::warning::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; using at most 25 (the grouping request plus 2 review rounds must fit the 85-minute attempt)."
           fi
           EFFORT=medium
           case "$EFFORT" in low) ROUNDS=1 ;; medium) ROUNDS=2 ;; high) ROUNDS=3 ;; esac
           TASK=$TASK_TIMEOUT_MIN
           (( TASK > 25 )) && TASK=25
+          # Against the deadline actually used, so a request between the
+          # capped and the configured deadline still gets its warning.
+          if (( LLM_TIMEOUT_SEC > TASK * 60 )); then
+            echo "::warning::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK}-minute task deadline that contains it; it is clamped to that deadline."
+          fi
           LLM=$LLM_TIMEOUT_SEC
           (( LLM > TASK * 60 )) && LLM=$(( TASK * 60 ))
           echo "task_minutes=${TASK}" >> "$GITHUB_OUTPUT"
           echo "llm_timeout_sec=${LLM}" >> "$GITHUB_OUTPUT"
           echo "effort=${EFFORT}" >> "$GITHUB_OUTPUT"
-          # Whether the request limit was clamped, so the incomplete-review
-          # notice only recommends raising a setting that would take effect.
-          echo "llm_shortened=$( (( LLM < LLM_TIMEOUT_SEC )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
-          echo "Review time limits: ${LLM}s per request, ${TASK} min per review task per round (${ROUNDS} rounds), 80 min per attempt."
+          echo "Review time limits: ${LLM}s per request, ${TASK} min per review task per round (${ROUNDS} rounds), 85 min per attempt."
       - name: Run OpenCodeReview (primary)
         id: ocr-primary
         # Explicit: an attempt must never run with empty limits outputs.
@@ -354,7 +355,7 @@ jobs:
         # fallback attempts below instead of failing the job outright; the
         # final "Fail if all review attempts failed" step restores the red X
         # when no attempt succeeds.
-        timeout-minutes: 80
+        timeout-minutes: 85
         continue-on-error: true
         uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
@@ -423,7 +424,7 @@ jobs:
           steps.limits.outcome == 'success'
           && steps.ocr-primary.outcome == 'failure'
           && env.OCR_FALLBACK1_CONFIGURED == 'true'
-        timeout-minutes: 80
+        timeout-minutes: 85
         continue-on-error: true
         uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
@@ -476,7 +477,7 @@ jobs:
           && steps.ocr-primary.outcome == 'failure'
           && steps.ocr-fallback1.outcome != 'success'
           && env.OCR_FALLBACK2_CONFIGURED == 'true'
-        timeout-minutes: 80
+        timeout-minutes: 85
         continue-on-error: true
         uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
@@ -541,7 +542,9 @@ jobs:
           # The values actually used, so the notice below cannot drift from them.
           LLM_TIMEOUT_SEC: ${{ steps.limits.outputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ steps.limits.outputs.task_minutes }}
-          LLM_SHORTENED: ${{ steps.limits.outputs.llm_shortened }}
+          # "true" when any attempt succeeded: with none, a missing result is
+          # a failed run, not an unverified pass.
+          ATTEMPT_SUCCEEDED: ${{ steps.ocr-primary.outcome == 'success' || steps.ocr-fallback1.outcome == 'success' || steps.ocr-fallback2.outcome == 'success' }}
         run: |
           set -uo pipefail
           # Overridable so the test harness can run hermetically; unchanged in
@@ -582,15 +585,16 @@ jobs:
                               | if type == "string" then . else "" end
                               | @json | .[1:-1]' "$RESULT" 2>/dev/null || true)
           fi
-          DECLARED_PARTIAL=no
-          [ "$STATUS" = "partial" ] && DECLARED_PARTIAL=yes
-          [ "$TERMINAL" = "partial" ] && DECLARED_PARTIAL=yes
-          # "failed" is at least as incomplete as "partial". Since this gate
+          DECLARED_INCOMPLETE=no
+          [ "$STATUS" = "partial" ] && DECLARED_INCOMPLETE=yes
+          [ "$TERMINAL" = "partial" ] && DECLARED_INCOMPLETE=yes
+          # "failed" is at least as incomplete as "partial", hence the flag's
+          # name and the neutral "incomplete" wording below. Since this gate
           # also runs after a failed attempt, a run that failed before it
           # selected anything would otherwise read as "selected no files" and
           # clear the PR's notice green (Codex fallback review, #76).
-          [ "$STATUS" = "failed" ] && DECLARED_PARTIAL=yes
-          [ "$TERMINAL" = "failed" ] && DECLARED_PARTIAL=yes
+          [ "$STATUS" = "failed" ] && DECLARED_INCOMPLETE=yes
+          [ "$TERMINAL" = "failed" ] && DECLARED_INCOMPLETE=yes
 
           # Every "we cannot tell" path goes through here. Unknown is not the
           # same as verified, so it is reported loudly — but it does not fail
@@ -667,19 +671,19 @@ jobs:
           }
 
           abstain() {
-            if [ "$DECLARED_PARTIAL" = "yes" ]; then
-              echo "::error::OCR declared itself partial (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}) and $1. A partial review is not an approval." >&2
+            if [ "$DECLARED_INCOMPLETE" = "yes" ]; then
+              echo "::error::OCR reported itself incomplete (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}) and $1. A partial review is not an approval." >&2
               {
                 echo "## ❌ OpenCodeReview did not finish"
                 echo
-                echo "The run reported itself **partial** (status: \`${STATUS:-?}\`, terminal_state: \`${TERMINAL:-?}\`)"
+                echo "The run reported itself **incomplete** (status: \`${STATUS:-?}\`, terminal_state: \`${TERMINAL:-?}\`)"
                 echo "and $1, so which files went unreviewed could not be determined."
               } >> "$GITHUB_STEP_SUMMARY"
               {
                 echo "$GATE_MARKER"
                 echo "## ❌ OpenCodeReview did not finish"
                 echo
-                echo "The run reported itself **partial** and $1, so **which** files went"
+                echo "The run reported itself **incomplete** (status: \`${STATUS:-?}\`) and $1, so **which** files went"
                 echo "unreviewed could not be determined. No finding count from this run"
                 echo "describes this pull request."
                 echo
@@ -687,6 +691,24 @@ jobs:
               } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
               upsert_gate_comment
               exit 1
+            fi
+            # No attempt succeeded: there is no review to verify, and "Fail if
+            # all review attempts failed" turns the job red. Say that, not
+            # "green but unverified", which would contradict the red check.
+            if [ "${ATTEMPT_SUCCEEDED:-true}" != "true" ]; then
+              echo "::warning::No OCR review attempt succeeded ($1); the job fails in the next step."
+              echo "❌ No OCR review attempt succeeded ($1)." >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "$GATE_MARKER"
+                echo "## ❌ OpenCodeReview did not run"
+                echo
+                echo "No review attempt succeeded and $1, so no review of this PR exists."
+                echo "The check is red. The run log shows the failing attempt's last error."
+                echo
+                echo "<sub>[Run log](${RUN_URL})</sub>"
+              } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+              upsert_gate_comment
+              exit 0
             fi
             echo "::warning::OCR completeness could not be verified: $1. Treat this check as 'unknown', not 'passed'."
             echo "⚠️ OCR completeness could not be verified ($1)." >> "$GITHUB_STEP_SUMMARY"
@@ -756,7 +778,7 @@ jobs:
           N_SELECTED=$(printf '%s' "$COUNTS" | cut -f1)
           N_COVERED=$(printf '%s' "$COUNTS" | cut -f2)
 
-          INCOMPLETE="$DECLARED_PARTIAL"
+          INCOMPLETE="$DECLARED_INCOMPLETE"
           [ "$(jq '.manifest.coverage.failed | length' "$RESULT")" -gt 0 ] && INCOMPLETE=yes
           [ "${N_COVERED:-0}" -ne "${N_SELECTED:-0}" ] && INCOMPLETE=yes
 
@@ -820,14 +842,15 @@ jobs:
               echo "related files) per round and ${LLM_TIMEOUT_SEC:-?}s per request."
               # Recommend only a raise that would take effect: a setting has
               # headroom when it is below its own ceiling, 25 minutes for the
-              # deadline and 60 x the deadline for a request (unless clamped).
+              # deadline and 60 x the deadline for a request.
               # Neither with headroom means a raise cannot help: split.
               TASK_ROOM=; LLM_ROOM=
               if (( ${TASK_TIMEOUT_MIN:-25} < 25 )); then
                 TASK_ROOM=1
               fi
-              if [ "${LLM_SHORTENED:-}" != "true" ] \
-                 && (( ${LLM_TIMEOUT_SEC:-0} < ${TASK_TIMEOUT_MIN:-0} * 60 )); then
+              # A clamped request already equals 60 x the deadline, so this
+              # covers it without a separate flag.
+              if (( ${LLM_TIMEOUT_SEC:-0} < ${TASK_TIMEOUT_MIN:-0} * 60 )); then
                 LLM_ROOM=1
               fi
               # A `timeout` does not say which limit fired, so when both have

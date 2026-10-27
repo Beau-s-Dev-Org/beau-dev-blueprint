@@ -34,18 +34,29 @@ open(out, "w").write("#!/bin/bash\n" + match[0]["run"])
 want = {
     "TASK_TIMEOUT_MIN": "${{ steps.limits.outputs.task_minutes }}",
     "LLM_TIMEOUT_SEC": "${{ steps.limits.outputs.llm_timeout_sec }}",
-    "LLM_SHORTENED": "${{ steps.limits.outputs.llm_shortened }}",
+    "ATTEMPT_SUCCEEDED": "${{ steps.ocr-primary.outcome == 'success' || steps.ocr-fallback1.outcome == 'success' || steps.ocr-fallback2.outcome == 'success' }}",
 }
 env = match[0].get("env") or {}
 for k, v in want.items():
     if env.get(k) != v:
         sys.exit(f"env {k} is {env.get(k)!r}, expected {v!r}")
+# Exact set: a leftover entry pointing at a removed output would evaluate to
+# "" and pass a presence-only check.
+other = {"GH_TOKEN", "PR_NUMBER", "REPO", "RUN_URL"}
+if set(env) != set(want) | other:
+    sys.exit(f"the gate's env is {sorted(env)}, expected {sorted(set(want) | other)}")
 # The gate must run whenever an attempt ran, not only when one succeeded:
 # an all-files failure is reported as "failed", fails the attempt step, and
 # skipping the gate then left an older run's notice on the PR (#73).
 cond = " ".join(str(match[0].get("if", "")).replace("${{", "").replace("}}", "").split())
 if cond != "steps.limits.outcome == 'success' && steps.ocr-primary.outcome != 'skipped'":
     sys.exit(f"the gate's condition is {cond!r}; it must run whenever the primary attempt ran")
+# The condition has no status function, so Actions adds success(): the gate
+# runs after a failed attempt only because continue-on-error swallows it.
+for s in steps:
+    if s.get("id") in ("ocr-primary", "ocr-fallback1", "ocr-fallback2") \
+            and s.get("continue-on-error") not in (True, "true"):
+        sys.exit(f"attempt {s.get('id')} is not continue-on-error, so a failure would skip the gate")
 PY
 # Wiring checks exit after step.sh is written; no -e here, so check status.
 [ "$?" -eq 0 ] || { echo "FAIL: extraction or env-wiring checks failed"; exit 1; }
@@ -216,6 +227,11 @@ V1_NEWLINE_PATH='{"status":"success","manifest":{"schema_version":"ocr.run-manif
 V1_NEWLINE_ALIAS='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v1","terminal_state":"complete","coverage":{"selected":[{"path":"a.py"},{"path":"b.py"},{"path":"a.py\npath:b.py"}],"completed":[{"path":"a.py"},{"path":"b.py"}],"failed":[],"reused":[],"waived":[]}}}'
 # "partial" is a schema-independent fact: it must outrank every abstain path.
 PARTIAL_BAD_COVERAGE='{"status":"partial","manifest":{"schema_version":"ocr.run-manifest/v1","coverage":{}}}'
+# "failed" must outrank the abstain paths exactly as "partial" does.
+FAILED_BAD_COVERAGE='{"status":"failed","manifest":{"schema_version":"ocr.run-manifest/v1","coverage":{}}}'
+FAILED_BAD_SCHEMA='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v9","terminal_state":"failed"}}'
+# Reviewed everything, then failed (e.g. while posting): still not a pass.
+FAILED_BUT_COMPLETE=$(mk failed failed "$ALL3" '[]' '[]' '[]')
 PARTIAL_BAD_SCHEMA='{"status":"success","manifest":{"schema_version":"ocr.run-manifest/v9","terminal_state":"partial"}}'
 PARTIAL_NOT_JSON='not json at all'
 # Valid JSON whose root or .manifest is the wrong type: a bare .status lookup
@@ -280,6 +296,9 @@ run_case "  ...and still names it readably"       1 "$V1_NEWLINE_PATH"     'a.py
 run_case "a newline cannot forge two identities"  1 "$V1_NEWLINE_ALIAS"    "covered 2 of 3"
 run_case "partial outranks a malformed coverage"  1 "$PARTIAL_BAD_COVERAGE" "A partial review is not an approval"
 run_case "partial outranks an unknown schema"     1 "$PARTIAL_BAD_SCHEMA"  "A partial review is not an approval"
+run_case "failed outranks a malformed coverage"   1 "$FAILED_BAD_COVERAGE" "reported itself incomplete"
+run_case "failed outranks an unknown schema"      1 "$FAILED_BAD_SCHEMA"  "reported itself incomplete"
+run_case "a failed run that covered everything fails" 1 "$FAILED_BUT_COMPLETE" "reported itself incomplete without naming"
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'
@@ -297,6 +316,34 @@ if grep -q "pr comment" "$WORK/gh.log" && grep -q "did not finish" "$WORK/commen
   echo "  ok    a partial abstention still reaches the PR"; PASS=$((PASS+1))
 else
   echo "  FAIL  a partial abstention left the PR with nothing"; FAIL=$((FAIL+1))
+fi
+
+# The same for "failed", wording included: it must not call itself partial.
+: > "$WORK/gh.log"; : > "$WORK/comment.md"
+printf '%s' "$FAILED_BAD_COVERAGE" > "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+  GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "pr comment" "$WORK/gh.log" && grep -q 'reported itself \*\*incomplete\*\* (status: `failed`)' "$WORK/comment.md" \
+   && ! grep -q 'itself \*\*partial' "$WORK/comment.md"; then
+  echo "  ok    a failed abstention reaches the PR, worded as failed"; PASS=$((PASS+1))
+else
+  echo "  FAIL  a failed abstention did not reach the PR as failed"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
+fi
+
+# No attempt succeeded and no result: the job is red, so the PR must not be
+# told the check is "green but unverified".
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; rm -f "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+  GITHUB_STEP_SUMMARY="$WORK/summary.md" ATTEMPT_SUCCEEDED=false \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "pr comment" "$WORK/gh.log" && grep -q "did not run" "$WORK/comment.md" \
+   && ! grep -q "green but unverified" "$WORK/comment.md"; then
+  echo "  ok    a run with no successful attempt says so, not green"; PASS=$((PASS+1))
+else
+  echo "  FAIL  a run with no successful attempt was reported as green"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
 fi
 
 # An abstention is green, and must still reach the PR — otherwise "green but
@@ -353,39 +400,40 @@ fi
 
 # The timeout advice on the PR: suggest only a raise that would take effect.
 # One case per state the limits step can hand over: headroom on the deadline,
-# on the request only, on both, on neither, and a clamped request.
-advice() {  # name, task_min, llm_sec, llm_shortened, want, must_not
+# on the request only, on both, on neither. A clamped request equals 60 x the
+# deadline, so it is the "request at its deadline" case.
+advice() {  # name, task_min, llm_sec, want, must_not
   : > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
   PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
     OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
     GITHUB_STEP_SUMMARY="$WORK/summary.md" \
-    TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" LLM_SHORTENED="$4" \
+    TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" \
     bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/advice.out" 2>&1; local rc=$?
   # Empty text would make grep -qF match anything, either way round.
-  if [ -z "$5" ] || [ -z "$6" ]; then
+  if [ -z "$4" ] || [ -z "$5" ]; then
     echo "  FAIL  $1 (empty want/must-not: grep -qF \"\" matches anything)"; FAIL=$((FAIL+1)); return
   fi
   # A partial review must stay red whatever the limits state is.
-  if [ "$rc" = 1 ] && grep -qF "$5" "$WORK/comment.md" && ! grep -qF "$6" "$WORK/comment.md"; then
+  if [ "$rc" = 1 ] && grep -qF "$4" "$WORK/comment.md" && ! grep -qF "$5" "$WORK/comment.md"; then
     echo "  ok    $1"; PASS=$((PASS+1))
   else
     # Step output too, so a crash (exit 1, empty comment) reads differently
     # from changed advice text.
-    echo "  FAIL  $1 (exit $rc, wanted 1; wanted '$5', must not '$6')"
+    echo "  FAIL  $1 (exit $rc, wanted 1; wanted '$4', must not '$5')"
     sed 's/^/        /' "$WORK/advice.out"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
   fi
 }
-advice "advice: deadline below 25 suggests raising it" 20 1200 false \
+advice "advice: deadline below 25 suggests raising it" 20 1200 \
   'Raise `review_task_timeout_min` (at most 25)' 'already at their ceiling'
-advice "advice: both with room offers both"            20 300 false \
+advice "advice: both with room offers both"            20 300 \
   'and/or `llm_timeout_sec`' 'already at their ceiling'
-advice "advice: only the request has room"             25 1200 false \
+advice "advice: only the request has room"             25 1200 \
   'Raise `llm_timeout_sec`, up to 1500s' 'Raise `review_task_timeout_min`'
-advice "advice: both at the ceiling says split"        25 1500 false \
+advice "advice: both at the ceiling says split"        25 1500 \
   'already at their ceiling' 'Raise `'
-advice "advice: a clamped request is not offered"      10 600 true \
+advice "advice: a request at its deadline is not offered" 10 600 \
   'Raise `review_task_timeout_min`' 'Raise `llm_timeout_sec`'
-advice "advice: names a task as a file or a bundle"    25 1500 false \
+advice "advice: names a task as a file or a bundle"    25 1500 \
   'a bundle of' 'per file per'
 
 echo "$PASS passed, $FAIL failed"
