@@ -332,7 +332,7 @@ def assess(cfg, authors, commit, paths):
             out["invalid"].append({"file": path, "reason": f"commit {doc.get('commit')!r} is not a full 40-character SHA"})
             continue
         if doc["commit"].lower() != commit:
-            # A review of an earlier commit says nothing about this one.
+            # A review of any other commit, earlier or later, says nothing about this one.
             out["stale"].append({"file": path, "commit": doc.get("commit")})
             continue
         if not isinstance(doc.get("reviewer"), str) or not doc["reviewer"]:
@@ -405,7 +405,7 @@ def markdown(result, rounds):
     for i in result["ineligible"]:
         lines.append(f"- Did not count `{cell(os.path.basename(i['file']))}`: {cell(i['reason'])}")
     for i in result["stale"]:
-        lines.append(f"- Ignored `{cell(os.path.basename(i['file']))}`: a review of an older commit "
+        lines.append(f"- Ignored `{cell(os.path.basename(i['file']))}`: a review of a different commit "
                      f"(`{cell(str(i.get('commit'))[:12])}`)")
     short_by = result["required_clean_families"] - len(result["clean_families"])
     if not result["clean"] and short_by > 0:

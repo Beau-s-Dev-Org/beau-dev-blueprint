@@ -369,7 +369,7 @@ class Verdict(Base):
         self.assertIn("Needs 2 non-author families clean; 1 came back clean (openai).", out)
         self.assertIn("Did not count", out)
         self.assertIn("author's family", out)
-        self.assertIn("a review of an older commit", out)
+        self.assertIn("a review of a different commit", out)
 
     def test_markdown_section_for_a_clean_branch(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
