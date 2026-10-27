@@ -23,9 +23,9 @@
 # survive the pin because re-stamping every consuming repo is one command:
 # scripts/rollout-ocr.sh resolves the blueprint ref and rewrites this line.
 #
-# Job-level per-PR concurrency (cancel-in-progress) and a 65-minute job
-# timeout with 20-minute per-attempt step timeouts are all defined in the
-# reusable workflow.
+# Job-level per-PR concurrency (cancel-in-progress) and the job and
+# per-attempt step timeouts are all defined in the reusable workflow (the
+# numbers live only there, so this comment cannot fall out of date again).
 #
 # NOTE for manual copies: the SHA below is a placeholder. Either run
 # scripts/rollout-ocr.sh (which substitutes the real pin), or replace it with

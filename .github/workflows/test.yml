@@ -78,6 +78,9 @@ jobs:
       - name: OCR completeness gate
         run: bash scripts/test-ocr-completeness.sh
 
+      - name: OCR review time limits
+        run: bash scripts/test-ocr-limits.sh
+
       # Cross-family routing and the "clean" verdict for local review (BEA-591).
       # Uses only PyYAML, already installed above.
       # On Python 3.11, `unittest discover` exits 0 when it finds no tests,

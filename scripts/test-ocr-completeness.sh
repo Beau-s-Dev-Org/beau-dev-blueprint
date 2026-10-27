@@ -28,7 +28,24 @@ match = [s for s in steps if s.get("name") == step_name]
 if len(match) != 1:
     sys.exit(f"expected exactly one step named {step_name!r}, found {len(match)}")
 open(out, "w").write("#!/bin/bash\n" + match[0]["run"])
+# The cases below inject the limits variables themselves, so they cannot see
+# a dropped or renamed env line; production would then fall back to the
+# defaults and give wrong advice. Check the wiring that feeds them.
+want = {
+    "TASK_TIMEOUT_MIN": "${{ steps.limits.outputs.task_minutes }}",
+    "LLM_TIMEOUT_SEC": "${{ steps.limits.outputs.llm_timeout_sec }}",
+    "CONFIGURED_TASK_MIN": "${{ inputs.review_task_timeout_min }}",
+    "TASK_SHORTENED": "${{ steps.limits.outputs.task_shortened }}",
+    "TASK_CEILING": "${{ steps.limits.outputs.task_ceiling }}",
+    "LLM_SHORTENED": "${{ steps.limits.outputs.llm_shortened }}",
+}
+env = match[0].get("env") or {}
+for k, v in want.items():
+    if env.get(k) != v:
+        sys.exit(f"env {k} is {env.get(k)!r}, expected {v!r}")
 PY
+# Wiring checks exit after step.sh is written; no -e here, so check status.
+[ "$?" -eq 0 ] || { echo "FAIL: extraction or env-wiring checks failed"; exit 1; }
 [ -s "$WORK/step.sh" ] || { echo "FAIL: could not extract the step"; exit 1; }
 
 # gh must not actually post from a test run.
@@ -318,6 +335,53 @@ if grep -q "pr comment" "$WORK/gh.log"; then
 else
   echo "  FAIL  no PR comment was attempted"; FAIL=$((FAIL+1))
 fi
+
+# The timeout advice on the PR: suggest only a raise that would take effect.
+# One case per state the limits step can hand over (Codex, PR #74): headroom
+# on the deadline, headroom on the request only, both at the ceiling on a
+# small PR, and shortened to fit a large one.
+advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must_not[, configured_min[, ceiling]]
+  # configured defaults to the deadline: an unshortened deadline IS the configured one.
+  : > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
+  PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+    OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+    GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN="${8:-$2}" TASK_CEILING="${9:-25}" \
+    TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" TASK_SHORTENED="$4" LLM_SHORTENED="$5" \
+    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/advice.out" 2>&1; local rc=$?
+  # Empty text would make grep -qF match anything, either way round.
+  if [ -z "$6" ] || [ -z "$7" ]; then
+    echo "  FAIL  $1 (empty want/must-not: grep -qF \"\" matches anything)"; FAIL=$((FAIL+1)); return
+  fi
+  # A partial review must stay red whatever the limits state is.
+  if [ "$rc" = 1 ] && grep -qF "$6" "$WORK/comment.md" && ! grep -qF "$7" "$WORK/comment.md"; then
+    echo "  ok    $1"; PASS=$((PASS+1))
+  else
+    # Step output too, so a crash (exit 1, empty comment) reads differently
+    # from changed advice text.
+    echo "  FAIL  $1 (exit $rc, wanted 1; wanted '$6', must not '$7')"
+    sed 's/^/        /' "$WORK/advice.out"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
+  fi
+}
+advice "advice: deadline below 25 suggests raising it" 20 1200 false false \
+  'Raise `review_task_timeout_min`' 'already at their ceiling'
+advice "advice: both with room offers both"           20 300 false false \
+  'and/or `llm_timeout_sec`' 'already at their ceiling'
+advice "advice: only the request has room"             25 1200 false false \
+  'Raise `llm_timeout_sec`, up to 1500s' 'Raise `review_task_timeout_min`'
+advice "advice: deadline configured at the size cap says split" 10 600 false false \
+  'most this PR' 'Raise `' 10 10
+advice "  ...and with request room offers only the request" 10 300 false false \
+  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 10 10
+advice "advice: below a size cap offers up to the cap" 7 300 false false \
+  '(at most 10)' 'already at their ceiling' 7 10
+advice "advice: both at the ceiling says split"        25 1500 false false \
+  'already at their ceiling' 'Raise `'
+advice "advice: shortened deadline, request has room"  10 300 true false \
+  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 25 10
+advice "advice: shortened and full says split"         10 600 true true \
+  'already at their ceiling' 'Raise `' 25 10
+advice "  ...and says the deadline was shortened"      10 600 true true \
+  '25 min), so raising' 'Raise `' 25 10
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
