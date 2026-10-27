@@ -227,6 +227,14 @@ class Verdict(Base):
         self.assertEqual(code, 1)
         self.assertEqual(len(v["stale"]), 1)
 
+    def test_verdict_rejects_a_malformed_commit_id_as_unreadable_not_stale(self):
+        for bad in (None, "", 123, SHA[:12], "z" * 40):
+            path = self.result("codex", [finding("P1")], commit=bad)
+            code, v, _ = self.verdict("anthropic", [self.result("codex"), path])
+            self.assertEqual(code, 1, bad)
+            self.assertEqual(len(v["invalid"]), 1, bad)
+            self.assertEqual(v["stale"], [], bad)
+
     def test_stale_findings_do_not_block_the_current_commit(self):
         code, _, _ = self.verdict("anthropic", [self.result("codex", [finding("P1")], commit=OLD_SHA),
                                                 self.result("codex")])

@@ -299,7 +299,13 @@ def assess(cfg, authors, commit, paths):
         if not isinstance(doc, dict) or doc.get("schema") != RESULT_SCHEMA:
             out["invalid"].append({"file": path, "reason": f"not a {RESULT_SCHEMA} object"})
             continue
-        if not isinstance(doc.get("commit"), str) or doc["commit"].lower() != commit:
+        if not isinstance(doc.get("commit"), str) or not SHA_RE.match(doc["commit"].lower()):
+            # Missing, empty, abbreviated or non-string: that does not show the
+            # review was of an OLDER commit, so it must not be waved through as
+            # stale with its findings unread.
+            out["invalid"].append({"file": path, "reason": f"commit {doc.get('commit')!r} is not a full 40-character SHA"})
+            continue
+        if doc["commit"].lower() != commit:
             # A review of an earlier commit says nothing about this one.
             out["stale"].append({"file": path, "commit": doc.get("commit")})
             continue
