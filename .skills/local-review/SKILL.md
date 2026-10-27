@@ -83,14 +83,24 @@ orca skills get orchestration
 ## 1. Who wrote it
 
 ```bash
-ME=anthropic   # YOUR model family: you write the fix commits, so you are an author too
-AUTHOR=$($LR detect-author --base "$BASE" --also "$ME" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["families"]))')
+ME=anthropic   # YOUR model family
+FAMS='import json,sys; print(",".join(json.load(sys.stdin)["families"]))'
+# Before you have committed anything on this branch:
+AUTHOR=$($LR detect-author --base "$BASE" | python3 -c "$FAMS")
+# From the round after your first fix commit onward:
+AUTHOR=$($LR detect-author --base "$BASE" --also "$ME" | python3 -c "$FAMS")
 ```
 
-`--also "$ME"` matters from the first fix round onward. A Claude coordinator
-fixing a Codex-written branch makes Claude an author of the diff, so Claude must
-not review the next round. Give every fix commit your own `Co-Authored-By:`
-trailer as well, so the history says who wrote what.
+Every case, so none is left to judgment:
+
+| Situation | `AUTHOR` |
+|---|---|
+| Trailers name the author, and you have not committed yet | `detect-author` without `--also`. Adding yourself now would rule your family out as a reviewer for no reason, and on a hold path that can leave too few families. |
+| You have committed a fix | `detect-author --also "$ME"`. You are now an author of the diff, and must not review it. |
+| `detect-author` exits 2 (no trailer names a family) | If **you** wrote every commit on the branch, `AUTHOR=$ME`. Otherwise stop and ask Beau who wrote it. Never guess, and never let `--also` stand in for the unknown author: the script refuses that. |
+
+Give every commit you make a `Co-Authored-By:` trailer naming your model, so
+the history says who wrote what.
 
 ## 2. Each round
 
@@ -215,3 +225,16 @@ $LR unavailable --reason "<what happened, e.g. codex and antigravity both rate-l
 Push, open the PR with that section, and let OCR run the review rounds the way
 it did before local review existed. Tell Beau in one line that local review was
 skipped, and why.
+
+### Partly run: one family clean, the other unavailable
+
+On a hold-for-Beau path, one non-author family can come back clean while the
+second has no reviewer available (all its candidates failed, or `route` exits 3
+with `--exclude`). Do not wait, and do not count the run as clean:
+
+1. Open the PR with the `verdict --markdown` section. It reads **not clean**,
+   and it lists the family that did come back clean.
+2. Add one line under it naming the family that could not run, and why (for
+   example "google: Antigravity not signed in to Orca").
+3. Say the same in one line to Beau. A hold-for-Beau PR waits for him anyway.
+   This tells him it had one independent review, not two.

@@ -112,8 +112,28 @@ class DetectAuthor(Base):
         code, plan, _ = self.route(authors, "--no-advance")
         self.assertEqual({c["family"] for c in plan["candidates"]}, {"google"})
 
+    def test_detect_author_rejects_also_as_a_stand_in_for_an_unknown_author(self):
+        # No trailer names anyone: the real author is unknown, so adding the
+        # coordinator must not turn that into "the coordinator wrote it".
+        code, out, _ = self.run_cli("detect-author", "--log-file", self.log("fix: y\n"),
+                                    "--also", "anthropic")
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["families"], [])
+
+    def test_first_round_keeps_the_coordinator_family_available(self):
+        # Codex-written hold branch, before any fix: Claude and Google may both
+        # review. Adding the coordinator early would leave one family.
+        log = self.log("feat: x\n\nCo-Authored-By: Codex <noreply@openai.com>\n")
+        code, out, _ = self.run_cli("detect-author", "--log-file", log)
+        self.assertEqual(json.loads(out)["families"], ["openai"])
+        code, plan, _ = self.route("openai", "--no-advance", files=(".github/workflows/ci.yml",))
+        self.assertEqual(code, 0)
+        self.assertEqual({c["family"] for c in plan["candidates"]}, {"anthropic", "google"})
+
     def test_detect_author_rejects_unknown_also_family(self):
-        code, _, _ = self.run_cli("detect-author", "--log-file", self.log("x\n"), "--also", "meta")
+        log = self.log("x\n\nCo-Authored-By: Codex <noreply@openai.com>\n")
+        code, _, err = self.run_cli("detect-author", "--log-file", log, "--also", "meta")
+        self.assertIn("unknown author family", err)
         self.assertEqual(code, 2)
 
     def test_detect_author_ignores_family_names_outside_trailers(self):
@@ -158,7 +178,9 @@ class Route(Base):
         for path in (".github/workflows/ci.yml", "src/auth/login.py", "LICENSE",
                      "db/migrations/001.sql", "scripts/local-review/reviewers.yaml",
                      ".skills/local-review/SKILL.md", "templates/ocr-review-caller.yml",
-                     "CLAUDE.md", "CLAUDE-template.md", "pkg/AGENTS.md"):
+                     "CLAUDE.md", "CLAUDE-template.md", "pkg/AGENTS.md",
+                     "db/schema.sql", "prisma/schema.prisma", "alembic/versions/0001_init.py",
+                     "queries/report.sql", "schemas/decision-record.json"):
             code, plan, _ = self.route("anthropic", "--no-advance", files=("README.md", path))
             self.assertEqual(code, 0, path)
             self.assertEqual(plan["tier"], "hold", path)

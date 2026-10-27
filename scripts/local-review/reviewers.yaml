@@ -73,6 +73,10 @@ hold_paths:
   - '(^|/)\.local-review-hold-paths$'
   - '(^|/)(CODEOWNERS|LICENSE[^/]*|REUSE\.toml)$'
   - '(?i)auth|rbac|identity|security|quarantine|secret|credential|licen[cs]e|migration'
+  # Database schema, whatever the stack calls it.
+  - '(?i)schema|\.sql$|(^|/)alembic/|\.prisma$'
+  # Customer-facing copy has no common path, so it cannot be listed here: each
+  # repo names its copy directories in its own .local-review-hold-paths.
 
 # Rounds before the loop stops and escalates to Beau instead of trying again.
 max_rounds: 5

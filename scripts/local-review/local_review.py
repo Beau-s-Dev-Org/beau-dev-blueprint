@@ -198,16 +198,20 @@ def cmd_detect_author(cfg, args):
         if not args.base:
             raise UsageError("pass --base <ref> or --log-file <path>")
         text = git("log", "--format=%B", f"{args.base}..HEAD").decode(errors="replace")
-    # --also adds families the trailers may not show, above all the
-    # coordinator's own: it writes the fix commits, so from the first fix round
-    # onward it is an author of the diff and must not be routed as a reviewer.
+    # --also adds families the trailers may not show: the coordinator's own,
+    # once it has committed a fix. It never stands in for the original author.
+    # If no trailer names anyone, the branch's real author is unknown, and
+    # "--also me" would quietly turn that into "only me" and let the actual
+    # author's family review its own work (Devin, PR #73).
     also = parse_families(cfg, args.also) if args.also else []
-    fams = sorted(set(families_in_text(cfg, text)) | set(also))
-    if not fams:
+    trailers = families_in_text(cfg, text)
+    if not trailers:
         # Unknown is not "any family": guessing here is exactly how a branch
         # ends up reviewed by the family that wrote it.
-        print(json.dumps({"families": [], "error": "no Co-Authored-By trailer names a known model family"}))
+        print(json.dumps({"families": [], "error": "no Co-Authored-By trailer names a known model family; "
+                          "pass --author-family to route/verdict yourself only if you know who wrote every commit"}))
         return 2
+    fams = sorted(set(trailers) | set(also))
     print(json.dumps({"families": fams}))
     return 0
 
