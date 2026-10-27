@@ -9,8 +9,9 @@ from lr_testkit import Base
 
 class DetectAuthor(Base):
     def log(self, text):
-        path = os.path.join(self.tmp, "log.txt")
-        with open(path, "w") as fh:
+        path = os.path.join(self.tmp, f"log-{self.n}.txt")
+        self.n += 1
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         return path
 

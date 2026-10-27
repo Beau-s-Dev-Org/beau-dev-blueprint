@@ -65,6 +65,11 @@ class Route(Base):
         code, _, _ = self.route("anthropic", "--exclude", "codex,antigravity")
         self.assertEqual(code, 3)
 
+    def test_route_rejects_an_unknown_exclude_id(self):
+        code, _, err = self.route("anthropic", "--exclude", "code")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown reviewer id code", err)
+
     def test_exclude_drops_a_failed_reviewer(self):
         code, plan, _ = self.route("anthropic", "--no-advance", "--exclude", "codex")
         self.assertEqual([c["id"] for c in plan["candidates"]], ["antigravity"])
@@ -118,7 +123,9 @@ class RepoHoldPaths(Base):
                      "codex-template.md", ".gitignore-template",
                      "docs/AI-COLLABORATOR-GUIDE-template.md", "docs/PROPOSAL-FORMAT.md",
                      "docs/GEMINI-GUIDE-template.md", "AGENTS-template",   # future templates too
-                     "SPEC_TEMPLATE.md", "docs/spec_template.md", "PULL_REQUEST_TEMPLATE.md"):
+                     "SPEC_TEMPLATE.md", "docs/spec_template.md", "PULL_REQUEST_TEMPLATE.md",
+                     "pyproject-template.toml", "ocr-caller-template.yml", "foo_template.py",
+                     "Templates.json"):
             self.assertEqual(self.tier(root, path), (0, "hold"), path)
 
     def test_a_missing_repo_root_is_an_error_not_no_policy(self):

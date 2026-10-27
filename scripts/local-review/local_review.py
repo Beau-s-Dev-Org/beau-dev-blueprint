@@ -115,6 +115,10 @@ def cmd_route(cfg, args):
         eligible = eligible[start:] + eligible[:start]
 
     exclude = {e.strip() for e in (args.exclude or "").split(",") if e.strip()}
+    # A typo would exclude nothing and offer the failed reviewer again.
+    unknown = exclude - {r["id"] for r in cfg["reviewers"]}
+    if unknown:
+        raise UsageError(f"--exclude: unknown reviewer id {', '.join(sorted(unknown))}")
     candidates = [r for r in eligible if r["id"] not in exclude]
     distinct = sorted({r["family"] for r in candidates})
     if len(distinct) < required:
