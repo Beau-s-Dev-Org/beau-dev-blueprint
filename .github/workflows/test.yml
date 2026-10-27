@@ -100,13 +100,17 @@ jobs:
           }
           # Per module too: a renamed module leaves the others still printing
           # "Ran N tests", and the gate green on a partial suite.
+          # Every module must have run: the known ones by name, so a module
+          # renamed out of discover's pattern or deleted still fails here, plus
+          # whatever test*.py exists, so a module added later is covered too.
+          # No content-based skipping: a module that lost its tests must fail.
+          # Shared helpers are named lr_*.py (lr_testkit.py), never test*.py.
+          expected="test_detect_author test_route test_verdict"
+          for path in scripts/local-review/test*.py; do
+            expected="$expected $(basename "$path" .py)"
+          done
           missing=
-          # Derived from the files, so a module added later is covered too.
-          for path in scripts/local-review/test*.py; do   # discover's own pattern
-            module=$(basename "$path" .py)
-            # No content-based skipping: a test module that lost its tests
-            # must fail here. Shared helpers are named lr_*.py (lr_testkit.py),
-            # so they never match test*.py.
+          for module in $(printf '%s\n' $expected | sort -u); do
             grep -qF "($module." "$RUNNER_TEMP/local-review-tests.log" || missing="$missing $module"
           done
           [ -z "$missing" ] || {
