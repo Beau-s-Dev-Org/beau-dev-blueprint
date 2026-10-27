@@ -72,7 +72,10 @@ on:
           for this fleet's real files rather than only for pathological ones.
           Must not exceed `review_task_timeout_min` × 60: a single request
           cannot usefully outlast the per-file task deadline that contains it.
-          The "Check review time limits" step enforces this.
+          The "Check review time limits" step enforces this. On a PR of more
+          than 8 files the per-file deadline is shortened to fit the attempt,
+          and this value is clamped to that shorter deadline, so the 1200 here
+          is the budget only for PRs of up to 8 files.
 
           Raised 600 -> 1200 (2026-10-03): marketing-as-code PR #363 still hit
           `timeout` at 600s on ~200-line Python modules, across several runs.
@@ -280,14 +283,18 @@ jobs:
         # rather than a killed attempt. The request timeout is clamped to fit
         # inside the deadline. The changed-file count includes files OCR will
         # skip (deletions, Markdown), so it is an upper bound and errs toward
-        # shorter deadlines, never longer. A count that cannot be read is an
-        # error, not a guess: both supported events always provide it.
+        # shorter deadlines, never longer; past 200 files the deadline sits at
+        # a 1-minute floor with a warning rather than blocking the review. A
+        # count that cannot be read is an error, not a guess: both supported
+        # events always provide it.
         shell: bash
         env:
           # BEA-327: never interpolate a context value into a run body.
           LLM_TIMEOUT_SEC: ${{ inputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ inputs.review_task_timeout_min }}
-          CHANGED_FILES: ${{ github.event.pull_request.changed_files || steps.pr-context.outputs.changed_files }}
+          # By event, not `a || b`: a genuine 0 is falsy in expressions and
+          # would fall through to an output that is empty on this path.
+          CHANGED_FILES: ${{ github.event_name == 'issue_comment' && steps.pr-context.outputs.changed_files || github.event.pull_request.changed_files }}
         run: |
           set -euo pipefail
           for v in LLM_TIMEOUT_SEC TASK_TIMEOUT_MIN; do
@@ -316,8 +323,13 @@ jobs:
           TASK=$(( 50 / (WAVES * ROUNDS) ))
           (( TASK > TASK_TIMEOUT_MIN )) && TASK=$TASK_TIMEOUT_MIN
           if (( TASK < 1 )); then
-            echo "::error::This PR changes ${N} files (${WAVES} waves of 8, ${ROUNDS} rounds each); even a 1-minute per-file deadline cannot fit the 60-minute attempt. Split the PR."
-            exit 1
+            # The count includes files OCR never selects (deletions, Markdown,
+            # lockfiles, generated trees), so the real load may be small. Run
+            # at the 1-minute floor rather than block every review: if the
+            # reviewable load really is this large, the attempt may still be
+            # cut off, and the warning says why.
+            echo "::warning::This PR changes ${N} files (${WAVES} waves of 8, ${ROUNDS} rounds each). Running at the 1-minute per-file floor; if most of those files are reviewable the attempt may not finish. Splitting the PR is the fix."
+            TASK=1
           fi
           LLM=$LLM_TIMEOUT_SEC
           (( LLM > TASK * 60 )) && LLM=$(( TASK * 60 ))
@@ -519,6 +531,7 @@ jobs:
           # The values actually used, so the notice below cannot drift from them.
           LLM_TIMEOUT_SEC: ${{ steps.limits.outputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ steps.limits.outputs.task_minutes }}
+          CONFIGURED_TASK_MIN: ${{ inputs.review_task_timeout_min }}
         run: |
           set -uo pipefail
           # Overridable so the test harness can run hermetically; unchanged in
@@ -787,12 +800,16 @@ jobs:
               echo
               echo "A review that did not run is not an approval. \`timeout\` means the file"
               echo "hit a time limit and will keep doing so — re-running alone will not help."
-              echo "Two limits apply: the per-file task deadline (${TASK_TIMEOUT_MIN:-?} min per round"
-              echo "this run; \`review_task_timeout_min\`, at most 25, shortened automatically for PRs"
-              echo "over 8 files) and the per-request limit inside it (${LLM_TIMEOUT_SEC:-?}s this run;"
-              echo "\`llm_timeout_sec\`). Either can be the one that fired: raise"
-              echo "\`review_task_timeout_min\` and/or \`llm_timeout_sec\` in the caller stub,"
-              echo "or split the file or the PR."
+              echo "This run allowed ${TASK_TIMEOUT_MIN:-?} min per file per review round and"
+              echo "${LLM_TIMEOUT_SEC:-?}s per request."
+              if [ "${TASK_TIMEOUT_MIN:-}" = "${CONFIGURED_TASK_MIN:-}" ]; then
+                echo "Those are the caller stub's settings, so either can be the one that fired:"
+                echo "raise \`review_task_timeout_min\` (at most 25) and/or \`llm_timeout_sec\`, or"
+                echo "split the file."
+              else
+                echo "Those were shortened to fit this PR's size (configured: ${CONFIGURED_TASK_MIN:-?} min),"
+                echo "so raising the settings will not help. Split the PR, or the slow files."
+              fi
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"
               echo "the action does not expose); a re-run often finishes, and a smaller file helps."
               echo "For any other classification, re-run by commenting \`/open-code-review\`."

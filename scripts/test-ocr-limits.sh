@@ -36,7 +36,7 @@ pass=0; fail=0
 check() {
   : > "$WORK/gh_out"
   LLM_TIMEOUT_SEC="$2" TASK_TIMEOUT_MIN="$3" CHANGED_FILES="$4" GITHUB_OUTPUT="$WORK/gh_out" \
-    bash "$WORK/step.sh" >"$WORK/out" 2>&1
+    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1   # as Actions runs it
   local got=$? why=""
   [ "$got" -eq "$1" ] || why="expected exit $1, got $got"
   [ -z "$why" ] && [ -n "${6:-}" ] && ! grep -qF -- "$6" "$WORK/out" && why="output lacks: $6"
@@ -63,10 +63,17 @@ check 0 1200 25 200 "200 files: 25 waves, deadline 1"              "25 waves" "1
 check 0 600  10 11  "a lower configured deadline is kept"          "" "10 600"
 check 0 300  25 11  "a request below the deadline is kept"         "" "12 300"
 check 0 1200 25 0   "0 files counts as one wave"                   "1 wave(s)" "25 1200"
-check 0 1200 25 1   "effort is pinned to medium"                   "" ""
-grep -qx "effort=medium" "$WORK/gh_out" || { fail=$((fail+1)); echo "  FAIL  effort output is not 'medium'"; }
+: > "$WORK/gh_out"
+LLM_TIMEOUT_SEC=1200 TASK_TIMEOUT_MIN=25 CHANGED_FILES=1 GITHUB_OUTPUT="$WORK/gh_out" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
+if grep -qx "effort=medium" "$WORK/gh_out"; then
+  pass=$((pass+1)); echo "  ok    effort is pinned to medium"
+else
+  fail=$((fail+1)); echo "  FAIL  effort output is not 'medium'"; sed 's/^/        /' "$WORK/out"
+fi
 
-check 1 1200 25 201 "rejects a PR too large for even 1 min/file"   "Split the PR"
+check 0 1200 25 201 "201 files: 1-minute floor with a warning, review still runs" "::warning::" "1 60"
+check 0 1200 25 5000 "5000 files: still runs at the floor"         "Splitting the PR is the fix" "1 60"
 check 1 1200 25 ""  "rejects an unknown file count"                "Could not read the PR's changed-file count"
 check 1 1200 25 "x" "rejects a non-numeric file count"             "Could not read the PR's changed-file count"
 check 1 1501 25 11  "rejects a request longer than its deadline" "longer than the 25-minute"
