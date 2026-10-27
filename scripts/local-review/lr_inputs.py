@@ -4,7 +4,7 @@ import os
 import re
 import subprocess
 
-from lr_config import UsageError, read_text
+from lr_config import UsageError, compile_pattern, read_text
 
 def git(*args):
     try:
@@ -77,10 +77,8 @@ def repo_hold_patterns(root):
     if text is None:
         return []
     lines = [line.strip() for line in text.split("\n")]
-    try:
-        return [re.compile(line) for line in lines if line and not line.startswith("#")]
-    except re.error as exc:
-        raise UsageError(f"bad pattern in {path}: {exc}") from exc
+    return [compile_pattern(line, f"pattern in {path}")
+            for line in lines if line and not line.startswith("#")]
 
 
 def tier_for(cfg, files, root=None):

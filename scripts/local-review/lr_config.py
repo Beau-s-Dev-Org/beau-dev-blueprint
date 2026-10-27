@@ -47,6 +47,27 @@ def is_clean_pattern(value):
     return isinstance(value, str) and value != "" and value == value.strip()
 
 
+def compile_pattern(pat, what):
+    """Compile one config pattern, refusing any that would match everything.
+
+    The one place every pattern (families, hold_paths, the repo hold file)
+    is compiled. A pattern that matches the empty string ('', 'claude|',
+    '(?i)', '.*', 'x?') matches every trailer, model, or path, so it would
+    attribute every author to one family or hold every change. Checking the
+    compiled regex covers all of those at once (PR #73: empty, then padded,
+    then this were each found a round apart).
+    """
+    if not is_clean_pattern(pat):
+        raise UsageError(f"{what} {pat!r} must be a non-empty regex with no surrounding whitespace")
+    try:
+        rx = re.compile(pat)
+    except re.error as exc:
+        raise UsageError(f"bad {what} {pat!r}: {exc}") from exc
+    if rx.search("") is not None:
+        raise UsageError(f"{what} {pat!r} matches the empty string, so it would match everything")
+    return rx
+
+
 def read_text(path, missing_ok=False):
     """Every input file goes through here: unreadable is exit 2, never 1.
 
@@ -95,10 +116,8 @@ def load_config(path):
         # An empty pattern matches everything: every trailer and model would
         # count as that family. Same for an empty hold path, below.
         raise UsageError("families must be a non-empty mapping of family name to regex string")
-    try:
-        cfg["_family_re"] = {name: re.compile(pat) for name, pat in families.items()}
-    except (re.error, TypeError) as exc:
-        raise UsageError(f"bad family pattern: {exc}") from exc
+    cfg["_family_re"] = {name: compile_pattern(pat, f"family pattern for {name}")
+                         for name, pat in families.items()}
 
     seen = set()
     reviewers = cfg.get("reviewers")
@@ -144,10 +163,7 @@ def load_config(path):
     hold = cfg["hold_paths"] if "hold_paths" in cfg else []
     if not isinstance(hold, list) or not all(is_clean_pattern(p) for p in hold):
         raise UsageError("hold_paths must be a list of non-empty regex strings")
-    try:
-        cfg["_hold_re"] = [re.compile(p) for p in hold]
-    except (re.error, TypeError) as exc:
-        raise UsageError(f"bad hold_paths pattern: {exc}") from exc
+    cfg["_hold_re"] = [compile_pattern(p, "hold_paths pattern") for p in hold]
     rounds = cfg.get("max_rounds", 5)
     if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
         raise UsageError("max_rounds must be a positive integer")

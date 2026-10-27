@@ -116,6 +116,19 @@ class RepoHoldPaths(Base):
         self.hold_file("# comment\n\n^scripts/\n")
         self.assertEqual(self.tier(self.tmp, "scripts/build.sh"), (0, "hold"))
 
+    def test_blueprint_hold_list_is_bounded(self):
+        # Ordinary blueprint files stay standard, so a hold pattern broadened
+        # until it matches everything cannot pass unnoticed.
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        for path in ("README.md", "docs/blueprint-v2-design.md", "docs/README.md"):
+            self.assertEqual(self.tier(root, path), (0, "standard"), path)
+
+    def test_a_repo_hold_pattern_matching_the_empty_string_is_refused(self):
+        self.hold_file("^copy/\n(?i)\n")
+        code, err = self.tier(self.tmp, "x")
+        self.assertEqual(code, 2)
+        self.assertIn("matches the empty string", err)
+
     def test_blueprint_holds_its_ocr_gate_scripts(self):
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         for path in ("scripts/test-ocr-completeness.sh", "scripts/audit-ocr-completeness-states.py",
@@ -316,6 +329,19 @@ reviewers:
         code, err = self.load("  - {id: c, family: google, agent: cursor, multiprovider: true, enabled: true}\n")
         self.assertEqual(code, 2)
         self.assertIn("unknown key(s) multiprovider", err)
+
+    def test_config_patterns_that_match_the_empty_string_are_refused(self):
+        for pat in ("'claude|'", "'(?i)'", "'.*'", "'x?'"):
+            text = self.BASE.replace("anthropic: 'claude'", f"anthropic: {pat}") \
+                + "  - {id: c, family: openai, agent: codex, enabled: true}\n"
+            code, _, err = self.run_cli("--config", self.config(text), "unavailable", "--reason", "x")
+            self.assertEqual(code, 2, pat)
+            self.assertIn("matches the empty string", err)
+        code, _, err = self.run_cli("--config", self.config(
+            self.BASE.replace("hold_paths: []", "hold_paths: ['a|']")
+            + "  - {id: c, family: openai, agent: codex, enabled: true}\n"), "unavailable", "--reason", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("matches the empty string", err)
 
     def test_config_rejects_an_empty_family_pattern(self):
         for pat in ("''", "'  '", "' claude'", "'claude '"):
