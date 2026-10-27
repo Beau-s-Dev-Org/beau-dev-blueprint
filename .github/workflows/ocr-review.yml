@@ -70,8 +70,11 @@ on:
           Two consecutive PRs in beauzone/marketing-as-code hit this on
           ordinary source files (a ~900-line test module), so 300 is too tight
           for this fleet's real files rather than only for pathological ones.
-          Raise per-repo if a repo's files are larger still; note the ceiling
-          is the per-attempt step timeout, not this value.
+          Raise per-repo if a repo's files are larger still, but keep it at or
+          below 2700 (45 minutes): the per-attempt step timeout is 50 minutes
+          and also covers install, checkout and comment posting. A value at or
+          past the step budget gets the step killed with no review report,
+          instead of a legible partial review.
 
           Raised 600 -> 1200 (2026-10-03): marketing-as-code PR #363 still hit
           `timeout` at 600s on ~200-line Python modules, across several runs.
