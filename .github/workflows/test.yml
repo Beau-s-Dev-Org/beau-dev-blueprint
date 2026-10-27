@@ -102,7 +102,7 @@ jobs:
           # "Ran N tests", and the gate green on a partial suite.
           missing=
           # Derived from the files, so a module added later is covered too.
-          for path in scripts/local-review/test_*.py; do
+          for path in scripts/local-review/test*.py; do   # discover's own pattern
             module=$(basename "$path" .py)
             grep -qF "($module." "$RUNNER_TEMP/local-review-tests.log" || missing="$missing $module"
           done

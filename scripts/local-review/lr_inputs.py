@@ -45,7 +45,7 @@ def repo_root(args):
     if args.repo_root:
         return args.repo_root
     try:
-        return os.fsdecode(git("rev-parse", "--show-toplevel").strip())
+        return os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\n"))   # only git's newline: a path may end in a space
     except UsageError:
         if args.base:
             raise
@@ -61,6 +61,10 @@ def repo_hold_patterns(root):
     """
     if not root:
         return []
+    # A missing ROOT is not a missing hold file: from git it always exists, so
+    # this is a mistyped --repo-root, which would otherwise drop the policy.
+    if not os.path.isdir(root):
+        raise UsageError(f"repo root {root} is not a directory")
     path = os.path.join(root, REPO_HOLD_FILE)
     text = read_text(path, missing_ok=True)
     if text is None:

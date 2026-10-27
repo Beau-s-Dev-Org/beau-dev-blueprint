@@ -111,12 +111,11 @@ def load_config(path):
 
     # A string here would compile one regex per CHARACTER, and "^" alone puts
     # every path on hold; a mapping would compile its keys. Shape first.
-    # Only a MISSING key defaults to empty. `or []` also turned "", {} and
-    # false into an empty list, which passed the shape check and silently
-    # switched the hold tier off (PR #73).
-    hold = cfg.get("hold_paths")
-    if hold is None:
-        hold = []
+    # Only a MISSING key defaults to empty. `or []` turned "", {} and false
+    # into an empty list, and .get() turns an explicit null (a bare
+    # `hold_paths:` line) into None; both silently switched the hold tier off
+    # (PR #73). To mean "no hold paths", write `hold_paths: []`.
+    hold = cfg["hold_paths"] if "hold_paths" in cfg else []
     if not isinstance(hold, list) or not all(isinstance(p, str) for p in hold):
         raise UsageError("hold_paths must be a list of regex strings")
     try:

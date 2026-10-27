@@ -119,6 +119,11 @@ class RepoHoldPaths(Base):
                      "docs/AI-COLLABORATOR-GUIDE-template.md", "docs/PROPOSAL-FORMAT.md"):
             self.assertEqual(self.tier(root, path), (0, "hold"), path)
 
+    def test_a_missing_repo_root_is_an_error_not_no_policy(self):
+        code, err = self.tier(os.path.join(self.tmp, "typo"), "copy/home.md")
+        self.assertEqual(code, 2)
+        self.assertIn("is not a directory", err)
+
     def test_repo_hold_file_rejects_a_bad_pattern(self):
         self.hold_file("^scripts/(\n")
         code, err = self.tier(self.tmp, "x")
@@ -235,7 +240,7 @@ reviewers:
 
     def test_config_rejects_hold_paths_that_are_not_a_list_of_strings(self):
         # Falsy shapes too: "", {} and false must not read as "no hold paths".
-        for hold in ("'^scripts/'", "{'^a': 1}", "[1]", "''", "{}", "false"):
+        for hold in ("'^scripts/'", "{'^a': 1}", "[1]", "''", "{}", "false", "null", ""):
             path = self.config(self.BASE.replace("hold_paths: []", f"hold_paths: {hold}")
                                + "  - {id: c, family: openai, agent: codex, enabled: true}\n")
             code, _, err = self.run_cli("--config", path, "unavailable", "--reason", "x")

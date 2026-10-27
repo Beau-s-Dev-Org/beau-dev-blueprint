@@ -162,10 +162,17 @@ class Verdict(Base):
         self.assertIn("a review of a different commit", out)
 
     def test_a_non_ascii_utf8_result_is_read_as_utf8(self):
-        path = self.result("codex", [finding("P3", title="caf\u00e9 \u2014 \u2713")])
-        code, v, _ = self.verdict("anthropic", [path])
-        self.assertEqual(code, 0)
+        # ensure_ascii=False, so real multi-byte UTF-8 reaches the file, and a
+        # P1 so the decoded title comes back in `blocking`: read as latin-1 or
+        # the locale encoding, it would come back garbled.
+        title = "caf\u00e9 \u2014 \u2713"
+        raw = json.dumps({"schema": "local-review-result/v1", "reviewer": "codex", "commit": SHA,
+                          "completed": True, "findings": [finding("P1", title=title)]},
+                         ensure_ascii=False)
+        code, v, _ = self.verdict("anthropic", [self.result("codex", raw=raw)])
+        self.assertEqual(code, 1)
         self.assertEqual(v["invalid"], [])
+        self.assertEqual(v["blocking"][0]["title"], title)
 
     def test_markdown_section_for_a_clean_branch(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,

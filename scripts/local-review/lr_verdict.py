@@ -108,7 +108,7 @@ def markdown(result, rounds):
         where = f" ({cell(b['file'])}{':' + str(b['line']) if b.get('line') else ''})" if b.get("file") else ""
         lines.append(f"- **{b['severity']}** from {cell(b['reviewer'])}: {cell(b['title'])}{where}")
     for i in result["invalid"]:
-        lines.append(f"- Unreadable result `{cell(os.path.basename(i['file']))}`: {cell(i['reason'])}")
+        lines.append(f"- Invalid result `{cell(os.path.basename(i['file']))}`: {cell(i['reason'])}")
     # Say why every result that did not count did not count, so a "not clean"
     # section can never be an empty table with no explanation.
     for i in result["ineligible"]:
