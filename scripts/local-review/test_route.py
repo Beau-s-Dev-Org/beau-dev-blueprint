@@ -164,7 +164,8 @@ class RepoHoldPaths(Base):
     def test_author_paths_are_not_mistaken_for_auth(self):
         for path, tier in (("src/authors/index.ts", "standard"), ("lib/author.ts", "standard"),
                            ("src/auth/login.py", "hold"), ("api/oauth.py", "hold"),
-                           ("src/authorization.py", "hold"), ("authn/session.go", "hold")):
+                           ("src/authorization.py", "hold"), ("src/authorisation.py", "hold"),
+                           ("lib/Authorise.ts", "hold"), ("authn/session.go", "hold")):
             self.assertEqual(self.tier(self.tmp, path), (0, tier), path)
 
     def test_route_rejects_a_rename_out_of_a_hold_path_as_standard(self):
