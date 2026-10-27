@@ -96,8 +96,13 @@ def load_config(path):
                 f"reviewer {r['id']} is family {r['family']} but its model "
                 f"{r['model']!r} does not match that family's pattern")
 
+    # A string here would compile one regex per CHARACTER, and "^" alone puts
+    # every path on hold; a mapping would compile its keys. Shape first.
+    hold = cfg.get("hold_paths") or []
+    if not isinstance(hold, list) or not all(isinstance(p, str) for p in hold):
+        raise UsageError("hold_paths must be a list of regex strings")
     try:
-        cfg["_hold_re"] = [re.compile(p) for p in cfg.get("hold_paths") or []]
+        cfg["_hold_re"] = [re.compile(p) for p in hold]
     except (re.error, TypeError) as exc:
         raise UsageError(f"bad hold_paths pattern: {exc}")
     if not isinstance(cfg.get("max_rounds", 5), int) or cfg.get("max_rounds", 5) < 1:
@@ -271,8 +276,6 @@ def cmd_route(cfg, args):
     if eligible:
         start = pointer % len(eligible)
         eligible = eligible[start:] + eligible[:start]
-        if not args.no_advance:
-            write_pointer(state, pointer + 1)
 
     exclude = {e.strip() for e in (args.exclude or "").split(",") if e.strip()}
     candidates = [r for r in eligible if r["id"] not in exclude]
@@ -283,6 +286,10 @@ def cmd_route(cfg, args):
             f"{len(distinct)} available ({', '.join(distinct) or 'none'}) for author "
             f"{', '.join(authors)}; enable another reviewer in reviewers.yaml, or "
             f"push and let OCR run the rounds")
+
+    # Only a route that is actually used consumes a rotation slot.
+    if eligible and not args.no_advance:
+        write_pointer(state, pointer + 1)
 
     print(json.dumps({
         "author_families": authors,

@@ -168,7 +168,9 @@ class Route(Base):
 
     def test_route_rejects_disabled_reviewers(self):
         code, plan, _ = self.route("anthropic", "--no-advance")
-        self.assertNotIn("cursor-openai", [c["id"] for c in plan["candidates"]])
+        ids = [c["id"] for c in plan["candidates"]]
+        self.assertEqual(ids, ["codex", "antigravity"])   # exactly the enabled non-author ones
+        self.assertNotIn("cursor-openai", ids)
 
     def test_standard_path_needs_one_clean_family(self):
         code, plan, _ = self.route("anthropic", "--no-advance")
@@ -214,7 +216,14 @@ class Route(Base):
         os.makedirs(os.path.dirname(self.state))
         with open(self.state, "w") as fh:
             fh.write("{not json")
-        self.assertEqual(self.route("anthropic")[0], 0)
+        code, plan, _ = self.route("anthropic")
+        self.assertEqual(code, 0)
+        self.assertEqual(plan["candidates"][0]["id"], "codex")
+
+    def test_an_unsatisfiable_route_does_not_consume_a_rotation_slot(self):
+        self.assertEqual(self.route("anthropic", "--exclude", "codex,antigravity")[0], 3)
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.route("anthropic")[1]["candidates"][0]["id"], "codex")
 
 
 class Verdict(Base):
@@ -503,6 +512,14 @@ reviewers:
                               "  - {id: c, family: google, agent: antigravity, enabled: true}\n")
         self.assertEqual(code, 2)
         self.assertIn("duplicate", err)
+
+    def test_config_rejects_hold_paths_that_are_not_a_list_of_strings(self):
+        for hold in ("'^scripts/'", "{'^a': 1}", "[1]"):
+            path = self.config(self.BASE.replace("hold_paths: []", f"hold_paths: {hold}")
+                               + "  - {id: c, family: openai, agent: codex, enabled: true}\n")
+            code, _, err = self.run_cli("--config", path, "unavailable", "--reason", "x")
+            self.assertEqual(code, 2, hold)
+            self.assertIn("hold_paths must be a list", err)
 
     def test_config_rejects_unknown_family(self):
         code, err = self.load("  - {id: c, family: meta, agent: x, enabled: true}\n")

@@ -93,5 +93,8 @@ jobs:
 
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.
+      # !cancelled(): a failing gate above must not skip the report, since those are
+      # the runs where it is most wanted. Not on cancellation.
       - name: OCR completeness state audit
+        if: ${{ !cancelled() }}
         run: python3 scripts/audit-ocr-completeness-states.py
