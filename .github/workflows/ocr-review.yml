@@ -307,24 +307,30 @@ jobs:
           CHANGED_FILES: ${{ github.event_name == 'issue_comment' && steps.pr-context.outputs.changed_files || github.event.pull_request.changed_files }}
         run: |
           set -euo pipefail
-          for v in LLM_TIMEOUT_SEC TASK_TIMEOUT_MIN; do
-            [[ "${!v}" =~ ^[1-9][0-9]{0,4}$ ]] || {
-              echo "::error::${v} must be a positive integer, got '${!v}'."
-              exit 1
-            }
-          done
-          if (( TASK_TIMEOUT_MIN > 25 )); then
-            echo "::error::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; the maximum is 25 (one wave of 8 files at 2 review rounds must fit the 60-minute attempt step)."
-            exit 1
-          fi
-          if (( LLM_TIMEOUT_SEC > TASK_TIMEOUT_MIN * 60 )); then
-            echo "::error::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute per-file task deadline that contains it."
-            exit 1
-          fi
-          [[ "${CHANGED_FILES:-}" =~ ^[0-9]{1,6}$ ]] || {
-            echo "::error::Could not read the PR's changed-file count ('${CHANGED_FILES:-}'), so no per-file deadline can be guaranteed to fit the attempt."
+          # Errors are also written as an output, for "Report a limits error
+          # on the PR". Newlines are stripped first: a value containing one
+          # could otherwise add arbitrary outputs to GITHUB_OUTPUT.
+          die() {
+            local msg="${1//$'\n'/ }"; msg="${msg//$'\r'/ }"
+            echo "::error::${msg}"
+            echo "error=${msg}" >> "$GITHUB_OUTPUT"
             exit 1
           }
+          for v in LLM_TIMEOUT_SEC TASK_TIMEOUT_MIN; do
+            [[ "${!v}" =~ ^[1-9][0-9]{0,4}$ ]] || die "${v} must be a positive integer, got '${!v}'."
+          done
+          # Out-of-range settings are clamped by the derivation below (the
+          # deadline never exceeds 25, the request never exceeds the deadline),
+          # so they warn rather than fail: an older stub that raised them keeps
+          # getting a review.
+          if (( TASK_TIMEOUT_MIN > 25 )); then
+            echo "::warning::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; using at most 25 (one wave of 8 files at 2 review rounds must fit the 60-minute attempt step)."
+          fi
+          if (( LLM_TIMEOUT_SEC > TASK_TIMEOUT_MIN * 60 )); then
+            echo "::warning::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute per-file deadline that contains it; it is clamped to that deadline."
+          fi
+          [[ "${CHANGED_FILES:-}" =~ ^[0-9]{1,6}$ ]] \
+            || die "Could not read the PR's changed-file count ('${CHANGED_FILES:-}'), so no per-file deadline can be guaranteed to fit the attempt."
           N=$(( 10#$CHANGED_FILES ))
           (( N >= 1 )) || N=1
           EFFORT=medium
@@ -832,16 +838,18 @@ jobs:
               # Recommend only a raise that would take effect this way.
               if [ "${TASK_SHORTENED:-}" != "true" ]; then
                 echo "Those are the caller stub's settings, so either can be the one that fired:"
-                echo "raise \`review_task_timeout_min\` (at most 25) and/or \`llm_timeout_sec\`, or"
-                echo "split the file."
-              elif [ "${LLM_SHORTENED:-}" != "true" ]; then
+                echo "raise \`review_task_timeout_min\` (at most 25) and/or \`llm_timeout_sec\` (at most"
+                echo "60 × the deadline; higher is clamped), or split the file."
+              elif [ "${LLM_SHORTENED:-}" != "true" ] \
+                   && (( ${LLM_TIMEOUT_SEC:-0} < ${TASK_TIMEOUT_MIN:-0} * 60 )); then
                 echo "The per-file limit was shortened to fit this PR's size (configured:"
                 echo "${CONFIGURED_TASK_MIN:-?} min), so raising \`review_task_timeout_min\` will not help."
                 echo "\`llm_timeout_sec\` was not shortened: raising it, up to $(( ${TASK_TIMEOUT_MIN:-0} * 60 ))s, may."
                 echo "Otherwise split the PR, or the slow files."
               else
-                echo "Both were shortened to fit this PR's size (configured: ${CONFIGURED_TASK_MIN:-?} min),"
-                echo "so raising the settings will not help. Split the PR, or the slow files."
+                echo "The limits were shortened to fit this PR's size (configured: ${CONFIGURED_TASK_MIN:-?} min)"
+                echo "and the request limit already fills the deadline, so raising the settings will"
+                echo "not help. Split the PR, or the slow files."
               fi
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"
               echo "the action does not expose); a re-run often finishes, and a smaller file helps."
@@ -858,6 +866,41 @@ jobs:
 
           echo "::error::OCR covered ${N_COVERED} of ${N_SELECTED} selected files (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}). A partial review is not an approval — see the job summary for the files it skipped."
           exit 1
+
+      - name: Report a limits error on the PR
+        # A limits failure skips every attempt and the completeness gate, so
+        # without this the PR would show a red check and nothing else.
+        if: failure() && steps.limits.outcome == 'failure'
+        timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
+        uses: actions/github-script@v9
+        env:
+          # BEA-327: never interpolate a context value into a script body.
+          LIMITS_ERROR: ${{ steps.limits.outputs.error }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!prNumber) return;
+            const marker = "<!-- ocr-limits-error -->";
+            // Plain text only: backticks and angle brackets cannot become markup.
+            const reason = (process.env.LIMITS_ERROR || "the limits step failed without a reason")
+              .replace(/[`<>]/g, "'");
+            const body = `${marker}\n## ❌ OpenCodeReview did not run\n\nThe review time limits could not be set, so no review attempt ran:\n\n> ${reason}\n\nFix the caller stub (or the PR) and push, or re-run with \`/open-code-review\`.\n\n<sub>[Run log](${process.env.RUN_URL})</sub>`;
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: prNumber, per_page: 100,
+              });
+              const mine = comments.filter((c) => c.user && c.user.type === "Bot" && c.body && c.body.includes(marker));
+              if (mine.length) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: mine[mine.length - 1].id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+              }
+            } catch (err) {
+              core.warning(`Could not post the limits error to PR #${prNumber}: ${err.message}`);
+            }
 
       - name: Fail if all review attempts failed
         timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds

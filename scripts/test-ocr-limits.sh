@@ -39,13 +39,22 @@ for k, v in want.items():
 ctx = [s for s in steps if s.get("id") == "pr-context"]
 if len(ctx) != 1 or "core.setOutput('changed_files'" not in ctx[0].get("with", {}).get("script", ""):
     sys.exit("the pr-context step no longer outputs changed_files")
-for s in steps:
+# By id, so an attempt that LOST these inputs fails too, not only one with
+# wrong values.
+attempts = [s for s in steps if s.get("id") in ("ocr-primary", "ocr-fallback1", "ocr-fallback2")]
+if len(attempts) != 3:
+    sys.exit(f"expected 3 review attempt steps, found {len(attempts)}")
+for s in attempts:
     w = s.get("with") or {}
-    if "review_task_timeout" in w and (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
+    if (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
             or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"
             or w.get("effort") != "${{ steps.limits.outputs.effort }}"):
         sys.exit(f"attempt {s.get('name')!r} is not fed by the limits step's outputs")
 PY
+# The wiring assertions above end in sys.exit AFTER step.sh is written, and
+# this script has no -e, so the status must be checked explicitly or a wiring
+# regression would leave the suite green.
+[ "$?" -eq 0 ] || { echo "FAIL: extraction or workflow-wiring checks failed"; exit 1; }
 [ -s "$WORK/step.sh" ] || { echo "FAIL: could not extract the step"; exit 1; }
 
 pass=0; fail=0
@@ -117,8 +126,19 @@ check 0 1200 25 201 "201 files: 1-minute floor with a warning, review still runs
 check 0 1200 25 5000 "5000 files: still runs at the floor"         "Splitting the PR is the fix" "1 60"
 check 1 1200 25 ""  "rejects an unknown file count"                "Could not read the PR's changed-file count"
 check 1 1200 25 "x" "rejects a non-numeric file count"             "Could not read the PR's changed-file count"
-check 1 1501 25 11  "rejects a request longer than its deadline" "longer than the 25-minute"
-check 1 1200 26 11  "rejects a deadline over 25 minutes"         "the maximum is 25"
+check 0 1501 25 3   "a request longer than its deadline is clamped, with a warning" "it is clamped to that deadline" "25 1500"
+check 0 1200 26 3   "a deadline over 25 is clamped, with a warning" "using at most 25" "25 1200"
+check 0 3000 30 3   "an older stub with higher settings still gets a review" "::warning::" "25 1500"
+
+# A failure also writes its reason as an output, newline-free.
+: > "$WORK/gh_out"
+LLM_TIMEOUT_SEC=$'12\ninjected=1' TASK_TIMEOUT_MIN=25 CHANGED_FILES=3 GITHUB_OUTPUT="$WORK/gh_out" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
+if [ "$(grep -c '^error=' "$WORK/gh_out")" = 1 ] && ! grep -q '^injected=' "$WORK/gh_out"; then
+  pass=$((pass+1)); echo "  ok    a failure's reason is one output line, newlines stripped"
+else
+  fail=$((fail+1)); echo "  FAIL  error output missing or injectable"; sed 's/^/        /' "$WORK/gh_out"
+fi
 check 1 1200 0  11  "rejects a zero deadline"                    "TASK_TIMEOUT_MIN must be a positive integer"
 check 1 0    25 11  "rejects a zero request timeout"             "LLM_TIMEOUT_SEC must be a positive integer"
 check 1 ""   25 11  "rejects an empty request timeout"           "LLM_TIMEOUT_SEC must be a positive integer"
