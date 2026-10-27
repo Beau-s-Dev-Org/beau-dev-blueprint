@@ -122,6 +122,24 @@ class RepoHoldPaths(Base):
         self.assertEqual(code, 2)
         self.assertIn("bad pattern", err)
 
+    def test_an_unreadable_repo_hold_file_is_an_error_not_absent(self):
+        # Present but unreadable must not quietly drop the repo's hold paths.
+        os.mkdir(os.path.join(self.tmp, ".local-review-hold-paths"))
+        code, err = self.tier(self.tmp, "copy/home.md")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read", err)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores permissions")
+    def test_a_hold_file_behind_a_permission_error_is_an_error(self):
+        root = os.path.join(self.tmp, "locked")
+        os.mkdir(root)
+        with open(os.path.join(root, ".local-review-hold-paths"), "w") as fh:
+            fh.write("^copy/\n")
+        os.chmod(root, 0o600)   # readable listing, no search: stat fails
+        self.addCleanup(os.chmod, root, 0o700)
+        code, err = self.tier(root, "copy/home.md")
+        self.assertEqual(code, 2)
+
     def test_editing_the_repo_hold_file_is_itself_on_hold(self):
         self.assertEqual(self.tier(self.tmp, ".local-review-hold-paths"), (0, "hold"))
 
@@ -202,6 +220,14 @@ reviewers:
         code, err = self.load("  - {id: c, family: meta, agent: x, enabled: true}\n")
         self.assertEqual(code, 2)
         self.assertIn("unknown family", err)
+
+    def test_config_rejects_non_utf8_bytes_with_exit_2(self):
+        path = os.path.join(self.tmp, "reviewers.yaml")
+        with open(path, "wb") as fh:
+            fh.write(self.BASE.encode() + b"  - {id: caf\xe9, family: openai, agent: codex, enabled: true}\n")
+        code, _, err = self.run_cli("--config", path, "unavailable", "--reason", "x")
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read", err)
 
     def test_config_rejects_wrong_schema(self):
         code, _, _ = self.run_cli("--config", self.config("schema: v0\n"), "unavailable",

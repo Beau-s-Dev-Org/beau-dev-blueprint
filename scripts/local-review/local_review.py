@@ -55,11 +55,11 @@ class Unsatisfiable(Exception):
 # --- config -----------------------------------------------------------------
 
 def load_config(path):
+    text = read_text(path)
     try:
-        with open(path, encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh)
-    except (OSError, yaml.YAMLError) as exc:
-        raise UsageError(f"cannot read config {path}: {exc}")
+        cfg = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise UsageError(f"cannot parse config {path}: {exc}")
     if not isinstance(cfg, dict) or cfg.get("schema") != CONFIG_SCHEMA:
         raise UsageError(f"config {path} is not {CONFIG_SCHEMA}")
 
@@ -123,7 +123,7 @@ def parse_families(cfg, value, flag="--author-family"):
 
 # --- git inputs -------------------------------------------------------------
 
-def read_text(path):
+def read_text(path, missing_ok=False):
     """Every input file goes through here: unreadable is exit 2, never 1.
 
     UnicodeDecodeError is a ValueError, not an OSError, so catching OSError
@@ -134,6 +134,13 @@ def read_text(path):
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
+    except FileNotFoundError as exc:
+        # Only a file that is positively absent may count as "not there".
+        # os.path.exists() also says False when it merely cannot look, so a
+        # hold list behind a permission error read as no hold list (PR #73).
+        if missing_ok:
+            return None
+        raise UsageError(f"cannot read {path}: {exc}")
     except (OSError, UnicodeDecodeError) as exc:
         raise UsageError(f"cannot read {path}: {exc}")
 
@@ -184,9 +191,10 @@ def repo_hold_patterns(root):
     if not root:
         return []
     path = os.path.join(root, REPO_HOLD_FILE)
-    if not os.path.exists(path):
+    text = read_text(path, missing_ok=True)
+    if text is None:
         return []
-    lines = [l.strip() for l in read_text(path).split("\n")]
+    lines = [l.strip() for l in text.split("\n")]
     try:
         return [re.compile(l) for l in lines if l and not l.startswith("#")]
     except re.error as exc:
