@@ -98,10 +98,10 @@ on:
           25 (2026-10-27): files in beau-dev-blueprint #73 hit the old fixed
           10. OCR reviews up to 8 files at once, so a PR of up to 16 files
           runs in two waves; 2 × 25 plus install and posting fits the
-          60-minute attempt step. Allowed range 1-25; the "Check review time
-          limits" step enforces it, because a deadline the step cannot contain
-          gets the step killed with no review report instead of a legible
-          partial review.
+          60-minute attempt step. Allowed range 1-25. For a PR of more than
+          16 files, "Check review time limits" passes a shorter deadline
+          (50 / waves) so the attempt still ends in a readable partial review
+          instead of a killed step.
         required: false
         type: string
         default: '25'
@@ -154,18 +154,20 @@ jobs:
   code-review:
     runs-on: ubuntu-latest
     # Each review attempt has its own 60-minute step timeout, so a hung LLM
-    # endpoint cannot consume the whole job budget; 190 covers three sequential
-    # attempts (3 × 60) plus overhead, guaranteeing the final fail-gate step
-    # still runs instead of being cancelled by the job timeout.
+    # endpoint cannot consume the whole job budget; 210 covers three sequential
+    # attempts (3 × 60) plus 30 minutes for PR context, the limits check, the
+    # install cleanups, the completeness gate's API calls and the Copilot step,
+    # guaranteeing the final fail-gate step still runs instead of being
+    # cancelled by the job timeout.
     #
-    # Nesting, enforced by "Check review time limits": llm_timeout_sec fits in
-    # review_task_timeout_min, and two waves of review_task_timeout_min fit in
-    # the 60-minute step. If a limit can outlast the step that contains it, a
+    # Nesting, enforced by "Check review time limits": the request timeout fits
+    # in the per-file deadline, and every wave of per-file deadlines (derived
+    # from the PR's file count) fits in the 60-minute step. If a limit can outlast the step that contains it, a
     # slow file stops producing a partial review — which the gate reports
     # precisely, naming the files it skipped — and starts producing a killed
     # step, which reports nothing useful and burns the attempt. Raising one
     # without the other trades a legible failure for an illegible one.
-    timeout-minutes: 190
+    timeout-minutes: 210
     # Declared here rather than inherited. A reusable workflow with no
     # permissions block takes the caller's, so what this job can do depended on
     # every consuming repo's stub and on repository defaults — under a
@@ -256,19 +258,31 @@ jobs:
             });
             core.setOutput('base_ref', pullRequest.base.ref);
             core.setOutput('head_sha', pullRequest.head.sha);
+            core.setOutput('changed_files', String(pullRequest.changed_files));
 
       - name: Check review time limits
         id: limits
-        # Fails fast, before any LLM spend, when a caller stub sets limits that
-        # do not nest: a request that outlasts its file's task deadline, or a
-        # task deadline two waves of which cannot fit the 60-minute attempt
-        # step. Either produces a killed step that reports nothing instead of a
-        # legible partial review.
+        # Validates the caller stub's limits, then derives the ones each attempt
+        # actually uses, so that every attempt ends with a result the
+        # completeness gate can read instead of a killed step that reports
+        # nothing.
+        #
+        # OCR reviews 8 files at once, so a PR of N changed files runs in
+        # ceil(N/8) waves, each lasting up to the per-file task deadline. The
+        # attempt step is a fixed 60 minutes, 10 of them reserved for install,
+        # checkout and comment posting, so the deadline actually passed is
+        # min(review_task_timeout_min, floor(50 / waves)): up to 16 files get
+        # the full 25 minutes; a larger PR gets a shorter per-file deadline and
+        # a legible partial review rather than a killed attempt. The request
+        # timeout is clamped to fit inside that deadline. The changed-file
+        # count includes files OCR will skip (deletions, Markdown), so it is an
+        # upper bound and errs toward shorter deadlines, never longer.
         shell: bash
         env:
-          # BEA-327: never interpolate an input into a run body.
+          # BEA-327: never interpolate a context value into a run body.
           LLM_TIMEOUT_SEC: ${{ inputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ inputs.review_task_timeout_min }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files || steps.pr-context.outputs.changed_files }}
         run: |
           set -euo pipefail
           for v in LLM_TIMEOUT_SEC TASK_TIMEOUT_MIN; do
@@ -285,7 +299,29 @@ jobs:
             echo "::error::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute per-file task deadline that contains it."
             exit 1
           fi
-          echo "Review time limits: ${LLM_TIMEOUT_SEC}s per request, ${TASK_TIMEOUT_MIN} min per file, 60 min per attempt."
+          if [[ "${CHANGED_FILES:-}" =~ ^[0-9]{1,6}$ ]]; then
+            N=$(( 10#$CHANGED_FILES ))
+          else
+            # Unknown size: plan for two waves (the configured maximum), and say so.
+            echo "::warning::Could not read the PR's changed-file count ('${CHANGED_FILES:-}'); assuming up to 16 files."
+            N=16
+          fi
+          (( N >= 1 )) || N=1
+          WAVES=$(( (N + 7) / 8 ))
+          TASK=$(( 50 / WAVES ))
+          (( TASK > TASK_TIMEOUT_MIN )) && TASK=$TASK_TIMEOUT_MIN
+          if (( TASK < 1 )); then
+            echo "::error::This PR changes ${N} files (${WAVES} waves of 8); even a 1-minute per-file deadline cannot fit the 60-minute attempt. Split the PR."
+            exit 1
+          fi
+          LLM=$LLM_TIMEOUT_SEC
+          (( LLM > TASK * 60 )) && LLM=$(( TASK * 60 ))
+          if (( TASK < TASK_TIMEOUT_MIN )); then
+            echo "::notice::${N} changed files run in ${WAVES} waves, so the per-file deadline is ${TASK} min (configured ${TASK_TIMEOUT_MIN}) to fit the 60-minute attempt."
+          fi
+          echo "task_minutes=${TASK}" >> "$GITHUB_OUTPUT"
+          echo "llm_timeout_sec=${LLM}" >> "$GITHUB_OUTPUT"
+          echo "Review time limits: ${N} changed files, ${WAVES} wave(s); ${LLM}s per request, ${TASK} min per file, 60 min per attempt."
 
       - name: Run OpenCodeReview (primary)
         id: ocr-primary
@@ -307,10 +343,10 @@ jobs:
           llm_url: ${{ secrets.OCR_LLM_URL }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN }}
           llm_model: ${{ inputs.llm_model }}
-          llm_timeout: ${{ inputs.llm_timeout_sec }}
+          llm_timeout: ${{ steps.limits.outputs.llm_timeout_sec }}
           llm_use_anthropic: 'false'
           ocr_version: '1.13.3'
-          review_task_timeout: ${{ inputs.review_task_timeout_min }}
+          review_task_timeout: ${{ steps.limits.outputs.task_minutes }}
           # The primary gives up its artifact too. Inside the action the step
           # order is: run review -> UPLOAD ARTIFACT -> fail-on-error -> POST
           # COMMENTS. The upload therefore sits between a completed review and
@@ -371,10 +407,10 @@ jobs:
           llm_url: ${{ secrets.OCR_LLM_URL_FALLBACK1 }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 }}
           llm_model: ${{ inputs.llm_model_fallback1 }}
-          llm_timeout: ${{ inputs.llm_timeout_sec }}
+          llm_timeout: ${{ steps.limits.outputs.llm_timeout_sec }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback1 || 'false' }}
           ocr_version: '1.13.3'
-          review_task_timeout: ${{ inputs.review_task_timeout_min }}
+          review_task_timeout: ${{ steps.limits.outputs.task_minutes }}
           # See the fallback-semantics note in the header: the primary
           # attempt already uploaded ocr-review-result-<run_id>-<attempt>,
           # and a second upload under the same name 409s and fails the
@@ -419,10 +455,10 @@ jobs:
           llm_url: ${{ secrets.OCR_LLM_URL_FALLBACK2 }}
           llm_auth_token: ${{ secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 }}
           llm_model: ${{ inputs.llm_model_fallback2 }}
-          llm_timeout: ${{ inputs.llm_timeout_sec }}
+          llm_timeout: ${{ steps.limits.outputs.llm_timeout_sec }}
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback2 || 'false' }}
           ocr_version: '1.13.3'
-          review_task_timeout: ${{ inputs.review_task_timeout_min }}
+          review_task_timeout: ${{ steps.limits.outputs.task_minutes }}
           # Same artifact-name conflict as fallback 1.
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
@@ -469,8 +505,8 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # The values actually used, so the notice below cannot drift from them.
-          LLM_TIMEOUT_SEC: ${{ inputs.llm_timeout_sec }}
-          TASK_TIMEOUT_MIN: ${{ inputs.review_task_timeout_min }}
+          LLM_TIMEOUT_SEC: ${{ steps.limits.outputs.llm_timeout_sec }}
+          TASK_TIMEOUT_MIN: ${{ steps.limits.outputs.task_minutes }}
         run: |
           set -uo pipefail
           # Overridable so the test harness can run hermetically; unchanged in
@@ -739,10 +775,12 @@ jobs:
               echo
               echo "A review that did not run is not an approval. \`timeout\` means the file"
               echo "hit a time limit and will keep doing so — re-running alone will not help."
-              echo "Two limits apply: the per-file task deadline (\`review_task_timeout_min\` ="
-              echo "${TASK_TIMEOUT_MIN:-?} min, at most 25) and the per-request limit inside it"
-              echo "(\`llm_timeout_sec\` = ${LLM_TIMEOUT_SEC:-?}s). Raise the deadline in the caller"
-              echo "stub, or split the file."
+              echo "Two limits apply: the per-file task deadline (${TASK_TIMEOUT_MIN:-?} min this run;"
+              echo "\`review_task_timeout_min\`, at most 25, shortened automatically for PRs over"
+              echo "16 files) and the per-request limit inside it (${LLM_TIMEOUT_SEC:-?}s this run;"
+              echo "\`llm_timeout_sec\`). Either can be the one that fired: raise"
+              echo "\`review_task_timeout_min\` and/or \`llm_timeout_sec\` in the caller stub,"
+              echo "or split the file or the PR."
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"
               echo "the action does not expose); a re-run often finishes, and a smaller file helps."
               echo "For any other classification, re-run by commenting \`/open-code-review\`."
