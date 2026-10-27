@@ -75,7 +75,8 @@ on:
           The "Check review time limits" step enforces this. On a PR of more
           than 8 files the per-file deadline is shortened to fit the attempt,
           and this value is clamped to that shorter deadline, so the 1200 here
-          is the budget only for PRs of up to 8 files.
+          is the budget only for PRs small enough to keep it (up to 8 files at
+          the default deadline: 4-8 files get 16 minutes, 960s).
 
           Raised 600 -> 1200 (2026-10-03): marketing-as-code PR #363 still hit
           `timeout` at 600s on ~200-line Python modules, across several runs.
@@ -101,10 +102,11 @@ on:
           25 (2026-10-27): files in beau-dev-blueprint #73 hit the old fixed
           10. The deadline applies per review round, and effort is pinned to
           medium (2 rounds), so 25 × 2 plus install and posting fits the
-          60-minute attempt for one wave of up to 8 files. Allowed range 1-25.
+          60-minute attempt for a PR of up to 3 files. Allowed range 1-25.
           For larger PRs "Check review time limits" passes a shorter deadline,
-          50 / (waves × rounds), so the attempt still ends in a readable
-          partial review instead of a killed step.
+          50 / (waves × rounds + 1 for OCR's grouping request from 4 files),
+          so the attempt still ends in a readable partial review instead of a
+          killed step.
         required: false
         type: string
         default: '25'
@@ -276,12 +278,17 @@ jobs:
         # come from the effort level, pinned here to medium = 2 rounds
         # (internal/config/template/effort.go). The attempt step is a fixed 60
         # minutes, 10 of them reserved for install, checkout and comment
-        # posting, so the deadline passed is
-        #   min(review_task_timeout_min, floor(50 / (waves * rounds))):
-        # up to 8 files get the full 25 minutes per round, 9-16 get 12, and so
-        # on; a large PR gets a shorter deadline and a legible partial review
-        # rather than a killed attempt. The request timeout is clamped to fit
-        # inside the deadline. The changed-file count includes files OCR will
+        # posting. From 4 files OCR first sends one grouping request
+        # (GROUPING_MIN_FILES in its task template) BEFORE any per-file clock
+        # starts; that request is bounded by the request timeout, which is
+        # clamped to the deadline, so it costs at most one more deadline-sized
+        # slot. The deadline passed is therefore
+        #   min(review_task_timeout_min,
+        #       floor(50 / (waves * rounds + (files >= 4 ? 1 : 0)))):
+        # 1-3 files get the full 25 minutes per round, 4-8 get 16, 9-16 get 10,
+        # and so on; a large PR gets a shorter deadline and a legible partial
+        # review rather than a killed attempt. The request timeout is clamped
+        # to fit inside the deadline. The changed-file count includes files OCR will
         # skip (deletions, Markdown), so it is an upper bound and errs toward
         # shorter deadlines, never longer; past 200 files the deadline sits at
         # a 1-minute floor with a warning rather than blocking the review. A
@@ -320,7 +327,8 @@ jobs:
           EFFORT=medium
           case "$EFFORT" in low) ROUNDS=1 ;; medium) ROUNDS=2 ;; high) ROUNDS=3 ;; esac
           WAVES=$(( (N + 7) / 8 ))
-          TASK=$(( 50 / (WAVES * ROUNDS) ))
+          GROUPING=0; (( N >= 4 )) && GROUPING=1   # one grouping request first
+          TASK=$(( 50 / (WAVES * ROUNDS + GROUPING) ))
           (( TASK > TASK_TIMEOUT_MIN )) && TASK=$TASK_TIMEOUT_MIN
           if (( TASK < 1 )); then
             # The count includes files OCR never selects (deletions, Markdown,
@@ -339,6 +347,10 @@ jobs:
           echo "task_minutes=${TASK}" >> "$GITHUB_OUTPUT"
           echo "llm_timeout_sec=${LLM}" >> "$GITHUB_OUTPUT"
           echo "effort=${EFFORT}" >> "$GITHUB_OUTPUT"
+          # Which limits this run shortened, so the incomplete-review notice
+          # only recommends raising a setting that would take effect.
+          echo "task_shortened=$( (( TASK < TASK_TIMEOUT_MIN )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          echo "llm_shortened=$( (( LLM < LLM_TIMEOUT_SEC )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
           echo "Review time limits: ${N} changed files, ${WAVES} wave(s) x ${ROUNDS} rounds; ${LLM}s per request, ${TASK} min per file per round, 60 min per attempt."
 
       - name: Run OpenCodeReview (primary)
@@ -532,6 +544,8 @@ jobs:
           LLM_TIMEOUT_SEC: ${{ steps.limits.outputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ steps.limits.outputs.task_minutes }}
           CONFIGURED_TASK_MIN: ${{ inputs.review_task_timeout_min }}
+          TASK_SHORTENED: ${{ steps.limits.outputs.task_shortened }}
+          LLM_SHORTENED: ${{ steps.limits.outputs.llm_shortened }}
         run: |
           set -uo pipefail
           # Overridable so the test harness can run hermetically; unchanged in
@@ -802,12 +816,18 @@ jobs:
               echo "hit a time limit and will keep doing so — re-running alone will not help."
               echo "This run allowed ${TASK_TIMEOUT_MIN:-?} min per file per review round and"
               echo "${LLM_TIMEOUT_SEC:-?}s per request."
-              if [ "${TASK_TIMEOUT_MIN:-}" = "${CONFIGURED_TASK_MIN:-}" ]; then
+              # Recommend only a raise that would take effect this way.
+              if [ "${TASK_SHORTENED:-}" != "true" ]; then
                 echo "Those are the caller stub's settings, so either can be the one that fired:"
                 echo "raise \`review_task_timeout_min\` (at most 25) and/or \`llm_timeout_sec\`, or"
                 echo "split the file."
+              elif [ "${LLM_SHORTENED:-}" != "true" ]; then
+                echo "The per-file limit was shortened to fit this PR's size (configured:"
+                echo "${CONFIGURED_TASK_MIN:-?} min), so raising \`review_task_timeout_min\` will not help."
+                echo "\`llm_timeout_sec\` was not shortened: raising it, up to $(( ${TASK_TIMEOUT_MIN:-0} * 60 ))s, may."
+                echo "Otherwise split the PR, or the slow files."
               else
-                echo "Those were shortened to fit this PR's size (configured: ${CONFIGURED_TASK_MIN:-?} min),"
+                echo "Both were shortened to fit this PR's size (configured: ${CONFIGURED_TASK_MIN:-?} min),"
                 echo "so raising the settings will not help. Split the PR, or the slow files."
               fi
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"

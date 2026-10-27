@@ -50,19 +50,37 @@ check() {
 }
 
 read -r DEF_LLM DEF_TASK < "$WORK/defaults"
-check 0 "$DEF_LLM" "$DEF_TASK" 8 "shipped defaults pass (8 files) ($DEF_LLM s, $DEF_TASK min)" "" "$DEF_TASK $DEF_LLM"
+check 0 "$DEF_LLM" "$DEF_TASK" 3 "shipped defaults pass (3 files) ($DEF_LLM s, $DEF_TASK min)" "" "$DEF_TASK $DEF_LLM"
 
-# Per-file deadline = min(configured, floor(50 / (waves of 8 * 2 rounds))).
-check 0 1200 25 1   "1 file: one wave, full deadline"              "1 wave(s) x 2 rounds" "25 1200"
-check 0 1200 25 8   "8 files: one wave, full deadline"             "1 wave(s)" "25 1200"
-check 0 1200 25 9   "9 files: two waves, deadline 12"              "deadline is 12 min" "12 720"
-check 0 1200 25 16  "16 files: two waves, deadline 12"             "2 waves" "12 720"
-check 0 1200 25 17  "17 files: three waves, deadline 8"            "3 waves" "8 480"
-check 0 1200 25 40  "40 files: five waves, deadline 5"             "5 waves" "5 300"
-check 0 1200 25 200 "200 files: 25 waves, deadline 1"              "25 waves" "1 60"
-check 0 600  10 11  "a lower configured deadline is kept"          "" "10 600"
-check 0 300  25 11  "a request below the deadline is kept"         "" "12 300"
-check 0 1200 25 0   "0 files counts as one wave"                   "1 wave(s)" "25 1200"
+# Per-file deadline = min(configured, floor(50 / (waves of 8 * 2 rounds
+#   + 1 grouping request from 4 files))).
+check 0 1200 25 1   "1 file: one wave, no grouping, full deadline"  "1 wave(s) x 2 rounds" "25 1200"
+check 0 1200 25 3   "3 files: still no grouping, full deadline"     "1 wave(s)" "25 1200"
+check 0 1200 25 4   "4 files: grouping request counted, deadline 16" "deadline is 16 min" "16 960"
+check 0 1200 25 8   "8 files: deadline 16"                          "1 wave(s)" "16 960"
+check 0 1200 25 9   "9 files: two waves, deadline 10"               "2 waves" "10 600"
+check 0 1200 25 16  "16 files: deadline 10"                         "2 waves" "10 600"
+check 0 1200 25 17  "17 files: three waves, deadline 7"             "3 waves" "7 420"
+check 0 1200 25 40  "40 files: five waves, deadline 4"              "5 waves" "4 240"
+check 0 1200 25 192 "192 files: 24 waves, deadline 1"               "24 waves" "1 60"
+check 0 600  10 2   "a lower configured deadline is kept"           "" "10 600"
+check 0 300  25 11  "a request below the deadline is kept"          "" "10 300"
+check 0 1200 25 0   "0 files counts as one wave"                    "1 wave(s)" "25 1200"
+
+# Which limits were shortened, for the notice's advice.
+flags() {  # $1 llm, $2 task, $3 files, $4 label, $5 expected "task llm" flags
+  : > "$WORK/gh_out"
+  LLM_TIMEOUT_SEC="$1" TASK_TIMEOUT_MIN="$2" CHANGED_FILES="$3" GITHUB_OUTPUT="$WORK/gh_out" \
+    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
+  local got
+  got="$(sed -n 's/^task_shortened=//p' "$WORK/gh_out") $(sed -n 's/^llm_shortened=//p' "$WORK/gh_out")"
+  if [ "$got" = "$5" ]; then pass=$((pass+1)); echo "  ok    $4"
+  else fail=$((fail+1)); echo "  FAIL  $4 (flags '$got', expected '$5')"; fi
+}
+flags 1200 25 2  "nothing shortened on a small PR"              "false false"
+flags 300  25 11 "deadline shortened, short request kept"       "true false"
+flags 1200 25 11 "deadline and request both shortened"          "true true"
+
 : > "$WORK/gh_out"
 LLM_TIMEOUT_SEC=1200 TASK_TIMEOUT_MIN=25 CHANGED_FILES=1 GITHUB_OUTPUT="$WORK/gh_out" \
   bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
