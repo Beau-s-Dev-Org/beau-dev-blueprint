@@ -117,6 +117,14 @@ def parse_families(cfg, value):
 
 # --- git inputs -------------------------------------------------------------
 
+def read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except OSError as exc:
+        raise UsageError(f"cannot read {path}: {exc}")
+
+
 def git(*args):
     try:
         return subprocess.run(["git", *args], check=True, capture_output=True).stdout
@@ -127,8 +135,9 @@ def git(*args):
 
 def changed_files(args):
     if args.changed_files:
-        with open(args.changed_files) as fh:
-            return [line for line in fh.read().split("\n") if line]
+        # Unreadable input is a usage error (exit 2). An uncaught OSError would
+        # exit 1, which the coordinator reads as "not clean".
+        return [line for line in read_text(args.changed_files).split("\n") if line]
     if args.base:
         # -z: a path may legally contain a newline. --no-renames: with rename
         # detection on, a rename reports only its DESTINATION, so moving
@@ -192,8 +201,7 @@ def families_in_text(cfg, text):
 
 def cmd_detect_author(cfg, args):
     if args.log_file:
-        with open(args.log_file) as fh:
-            text = fh.read()
+        text = read_text(args.log_file)
     else:
         if not args.base:
             raise UsageError("pass --base <ref> or --log-file <path>")
@@ -234,13 +242,21 @@ def read_pointer(path):
 
 def write_pointer(path, value):
     # Rotation is a fairness nicety; failing to save it must never fail routing.
+    tmp = None
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+        directory = os.path.dirname(path) or "."   # a bare filename has no dirname
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory)
         with os.fdopen(fd, "w") as fh:
             json.dump({"pointer": value}, fh)
         os.replace(tmp, path)
+        tmp = None
     except OSError as exc:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         print(f"warning: could not save rotation state to {path}: {exc}", file=sys.stderr)
 
 
@@ -384,6 +400,19 @@ def markdown(result, rounds):
         lines.append(f"- **{b['severity']}** from {cell(b['reviewer'])}: {cell(b['title'])}{where}")
     for i in result["invalid"]:
         lines.append(f"- Unreadable result `{cell(os.path.basename(i['file']))}`: {cell(i['reason'])}")
+    # Say why every result that did not count did not count, so a "not clean"
+    # section can never be an empty table with no explanation.
+    for i in result["ineligible"]:
+        lines.append(f"- Did not count `{cell(os.path.basename(i['file']))}`: {cell(i['reason'])}")
+    for i in result["stale"]:
+        lines.append(f"- Ignored `{cell(os.path.basename(i['file']))}`: a review of an older commit "
+                     f"(`{cell(str(i.get('commit'))[:12])}`)")
+    short_by = result["required_clean_families"] - len(result["clean_families"])
+    if not result["clean"] and short_by > 0:
+        lines.append(f"- Needs {result['required_clean_families']} non-author famil"
+                     f"{'y' if result['required_clean_families'] == 1 else 'ies'} clean; "
+                     f"{len(result['clean_families'])} came back clean"
+                     f"{' (' + ', '.join(result['clean_families']) + ')' if result['clean_families'] else ''}.")
     lines += ["", "OCR runs next as the final gate."]
     return "\n".join(lines)
 

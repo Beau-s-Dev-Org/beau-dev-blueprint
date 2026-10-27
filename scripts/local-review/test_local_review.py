@@ -266,8 +266,11 @@ class Verdict(Base):
     def test_verdict_rejects_a_malformed_reviewer_field(self):
         for bad in (None, "", 7, ["codex"], {"id": "codex"}):
             path = self.result("codex", [finding("P1")])
-            doc = json.load(open(path)); doc["reviewer"] = bad
-            json.dump(doc, open(path, "w"))
+            with open(path) as fh:
+                doc = json.load(fh)
+            doc["reviewer"] = bad
+            with open(path, "w") as fh:
+                json.dump(doc, fh)
             code, v, _ = self.verdict("anthropic", [self.result("codex"), path])
             self.assertEqual(code, 1, bad)
             self.assertEqual(len(v["invalid"]), 1, bad)
@@ -357,6 +360,17 @@ class Verdict(Base):
         self.assertIn("Rounds: 3", out)
         self.assertIn("a \\| b c", out)
 
+    def test_markdown_explains_a_not_clean_result_with_no_findings(self):
+        code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
+                                    "--changed-files", self.files(".github/workflows/ci.yml"),
+                                    "--markdown", self.result("codex"),
+                                    self.result("claude"), self.result("codex", commit=OLD_SHA))
+        self.assertEqual(code, 1)
+        self.assertIn("Needs 2 non-author families clean; 1 came back clean (openai).", out)
+        self.assertIn("Did not count", out)
+        self.assertIn("author's family", out)
+        self.assertIn("a review of an older commit", out)
+
     def test_markdown_section_for_a_clean_branch(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
                                     "--changed-files", self.files("src/app.py"), "--markdown",
@@ -364,6 +378,32 @@ class Verdict(Base):
         self.assertEqual(code, 0)
         self.assertIn("**Result: clean.**", out)
         self.assertIn("OCR runs next as the final gate.", out)
+
+
+class Inputs(Base):
+    def test_unreadable_inputs_exit_2_not_1(self):
+        # Exit 1 means "not clean"; a typo in a path must not read as a verdict.
+        missing = os.path.join(self.tmp, "nope.txt")
+        for argv in (("verdict", "--author-family", "anthropic", "--commit", SHA,
+                      "--changed-files", missing),
+                     ("route", "--author-family", "anthropic", "--changed-files", missing,
+                      "--state-file", self.state),
+                     ("detect-author", "--log-file", missing)):
+            code, _, err = self.run_cli(*argv)
+            self.assertEqual(code, 2, argv[0])
+            self.assertIn("cannot read", err)
+
+    def test_rotation_saves_to_a_bare_filename(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        code, _, err = self.run_cli("route", "--author-family", "anthropic",
+                                    "--changed-files", self.files("x"), "--state-file", "rot.json")
+        self.assertEqual(code, 0)
+        self.assertNotIn("warning", err)
+        with open(os.path.join(self.tmp, "rot.json")) as fh:
+            self.assertEqual(json.load(fh), {"pointer": 1})
+        self.assertEqual([f for f in os.listdir(self.tmp) if f.startswith("tmp")], [])
 
 
 class RepoHoldPaths(Base):

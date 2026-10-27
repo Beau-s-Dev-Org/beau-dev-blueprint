@@ -80,8 +80,16 @@ jobs:
 
       # Cross-family routing and the "clean" verdict for local review (BEA-591).
       # Uses only PyYAML, already installed above.
+      # On Python 3.11, `unittest discover` exits 0 when it finds no tests,
+      # so a renamed test module would turn this into a gate that runs
+      # nothing. Fail unless at least one test ran. pipefail keeps a real test
+      # failure from being masked by tee.
       - name: Local review routing
-        run: python3 -m unittest discover -s scripts/local-review -v
+        run: |
+          set -o pipefail
+          python3 -m unittest discover -s scripts/local-review -v 2>&1 \
+            | tee "$RUNNER_TEMP/local-review-tests.log"
+          grep -Eq '^Ran [1-9][0-9]* test' "$RUNNER_TEMP/local-review-tests.log"
 
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.
