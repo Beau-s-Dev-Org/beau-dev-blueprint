@@ -33,6 +33,9 @@ want = {
     "CHANGED_FILES": "${{ github.event_name == 'issue_comment' && steps.pr-context.outputs.changed_files || github.event.pull_request.changed_files }}",
 }
 env = match[0].get("env") or {}
+# This suite runs the body under bash; the workflow must too.
+if match[0].get("shell") != "bash":
+    sys.exit(f"the limits step's shell is {match[0].get('shell')!r}, not 'bash'")
 for k, v in want.items():
     if env.get(k) != v:
         sys.exit(f"env {k} is {env.get(k)!r}, expected {v!r}")
@@ -59,6 +62,13 @@ for a in attempt_ids:
 if len(attempts) != 3:
     sys.exit(f"expected 3 review attempt steps, found {len(attempts)}")
 for s in attempts:
+    # Gated explicitly, so a failed limits step cannot run an attempt with
+    # empty inputs; and 60 minutes each, the budget the body's 50-minute
+    # split and the expectations below all assume.
+    if "steps.limits.outcome == 'success'" not in str(s.get("if", "")):
+        sys.exit(f"attempt {s.get('name')!r} is not gated on the limits step succeeding")
+    if s.get("timeout-minutes") != 60:
+        sys.exit(f"attempt {s.get('name')!r} has timeout-minutes {s.get('timeout-minutes')!r}, not 60")
     w = s.get("with") or {}
     if (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
             or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"

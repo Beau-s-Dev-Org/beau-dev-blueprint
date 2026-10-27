@@ -330,11 +330,16 @@ advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must
     OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
     GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN="${8:-$2}" TASK_CEILING="${9:-25}" \
     TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" TASK_SHORTENED="$4" LLM_SHORTENED="$5" \
-    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
-  if grep -qF "$6" "$WORK/comment.md" && ! grep -qF "$7" "$WORK/comment.md"; then
+    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1; local rc=$?
+  # Empty text would make grep -qF match anything, either way round.
+  if [ -z "$6" ] || [ -z "$7" ]; then
+    echo "  FAIL  $1 (empty want/must-not: grep -qF \"\" matches anything)"; FAIL=$((FAIL+1)); return
+  fi
+  # A partial review must stay red whatever the limits state is.
+  if [ "$rc" = 1 ] && grep -qF "$6" "$WORK/comment.md" && ! grep -qF "$7" "$WORK/comment.md"; then
     echo "  ok    $1"; PASS=$((PASS+1))
   else
-    echo "  FAIL  $1 (wanted '$6', must not '$7')"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
+    echo "  FAIL  $1 (exit $rc, wanted 1; wanted '$6', must not '$7')"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
   fi
 }
 advice "advice: deadline below 25 suggests raising it" 20 1200 false false \
