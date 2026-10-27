@@ -64,7 +64,7 @@ class DetectAuthor(Base):
         self.assertEqual(code, 0)
         self.assertEqual({c["family"] for c in plan["candidates"]}, {"anthropic", "google"})
 
-    def test_an_empty_also_names_also_not_author_family(self):
+    def test_an_empty_also_names_no_family_and_not_an_author_family(self):
         log = self.log("x\n\nCo-Authored-By: Codex <noreply@openai.com>\n")
         code, _, err = self.run_cli("detect-author", "--log-file", log, "--also", " ,")
         self.assertEqual(code, 2)
@@ -78,9 +78,10 @@ class DetectAuthor(Base):
         self.assertEqual(code, 2)
 
     def test_detect_author_ignores_family_names_outside_trailers(self):
-        code, _, _ = self.run_cli("detect-author", "--log-file", self.log(
+        code, out, _ = self.run_cli("detect-author", "--log-file", self.log(
             "chore: bump the claude and gemini clients\n"))
         self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["families"], [])
 
 
 if __name__ == "__main__":

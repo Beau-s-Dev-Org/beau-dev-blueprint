@@ -72,7 +72,8 @@ hold_paths:
   # A repo's own hold list. Editing it can weaken the gate, so it is held too.
   - '(^|/)\.local-review-hold-paths$'
   - '(^|/)(CODEOWNERS|LICENSE[^/]*|REUSE\.toml)$'
-  - '(?i)auth|rbac|identity|security|quarantine|secret|credential|licen[cs]e|migration'
+  # auth(?!or): authn/authz/OAuth paths, not author/authors (authoriz* still matches).
+  - '(?i)authoriz|auth(?!or)|rbac|identity|security|quarantine|secret|credential|licen[cs]e|migration'
   # Database schema, whatever the stack calls it.
   - '(?i)schema|\.sql$|(^|/)alembic/|\.prisma$'
   # Customer-facing copy has no common path, so it cannot be listed here: each

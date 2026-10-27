@@ -96,7 +96,9 @@ jobs:
           # Per module too: a renamed module leaves the others still printing
           # "Ran N tests", and the gate green on a partial suite.
           missing=
-          for module in test_detect_author test_route test_verdict; do
+          # Derived from the files, so a module added later is covered too.
+          for path in scripts/local-review/test_*.py; do
+            module=$(basename "$path" .py)
             grep -qF "($module." "$RUNNER_TEMP/local-review-tests.log" || missing="$missing $module"
           done
           [ -z "$missing" ] || {

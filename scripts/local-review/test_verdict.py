@@ -198,6 +198,7 @@ class Inputs(Base):
         code, _, err = self.run_cli("route", "--author-family", "anthropic", "--repo-root", self.tmp,
                                     "--changed-files", self.files("x"), "--state-file", self.state)
         self.assertEqual(code, 2)
+        self.assertIn("cannot read", err)
 
     def test_rotation_saves_to_a_bare_filename(self):
         cwd = os.getcwd()

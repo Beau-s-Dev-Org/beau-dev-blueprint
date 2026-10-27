@@ -12,3 +12,5 @@
 ^codex-template\.md$
 ^\.gitignore-template$
 ^docs/AI-COLLABORATOR-GUIDE-template\.md$
+# The proposal spec the collaborator guide makes required reading.
+^docs/PROPOSAL-FORMAT\.md$

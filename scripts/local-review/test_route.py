@@ -114,7 +114,9 @@ class RepoHoldPaths(Base):
     def test_blueprint_holds_its_ocr_gate_scripts(self):
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         for path in ("scripts/test-ocr-completeness.sh", "scripts/audit-ocr-completeness-states.py",
-                     "scripts/rollout-ocr.sh", "scripts/requirements.txt"):
+                     "scripts/rollout-ocr.sh", "scripts/requirements.txt",
+                     "codex-template.md", ".gitignore-template",
+                     "docs/AI-COLLABORATOR-GUIDE-template.md", "docs/PROPOSAL-FORMAT.md"):
             self.assertEqual(self.tier(root, path), (0, "hold"), path)
 
     def test_repo_hold_file_rejects_a_bad_pattern(self):
@@ -158,6 +160,12 @@ class RepoHoldPaths(Base):
 
     def test_editing_the_repo_hold_file_is_itself_on_hold(self):
         self.assertEqual(self.tier(self.tmp, ".local-review-hold-paths"), (0, "hold"))
+
+    def test_author_paths_are_not_mistaken_for_auth(self):
+        for path, tier in (("src/authors/index.ts", "standard"), ("lib/author.ts", "standard"),
+                           ("src/auth/login.py", "hold"), ("api/oauth.py", "hold"),
+                           ("src/authorization.py", "hold"), ("authn/session.go", "hold")):
+            self.assertEqual(self.tier(self.tmp, path), (0, tier), path)
 
     def test_route_rejects_a_rename_out_of_a_hold_path_as_standard(self):
         # Real git: rename detection would report only archive/ci.yml.
