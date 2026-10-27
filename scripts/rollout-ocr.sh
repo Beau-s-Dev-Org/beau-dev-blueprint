@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Probe: verifies OCR v1.13.3 end to end on PR #74. Not for merge.
 # Roll the shared OCR review workflow out to one or more repos:
 #   1. sets the LLM secrets/variables on each repo (values read from YOUR
 #      environment, never from arguments — they don't land in shell history
