@@ -89,7 +89,10 @@ jobs:
           set -o pipefail
           python3 -m unittest discover -s scripts/local-review -v 2>&1 \
             | tee "$RUNNER_TEMP/local-review-tests.log"
-          grep -Eq '^Ran [1-9][0-9]* test' "$RUNNER_TEMP/local-review-tests.log"
+          grep -Eq '^Ran [1-9][0-9]* test' "$RUNNER_TEMP/local-review-tests.log" || {
+            echo "::error::unittest discover ran no tests in scripts/local-review; the suite did not load."
+            exit 1
+          }
 
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.

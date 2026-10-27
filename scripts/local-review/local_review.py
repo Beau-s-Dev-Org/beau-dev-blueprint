@@ -56,7 +56,7 @@ class Unsatisfiable(Exception):
 
 def load_config(path):
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
         raise UsageError(f"cannot read config {path}: {exc}")
@@ -110,23 +110,31 @@ def load_config(path):
     return cfg
 
 
-def parse_families(cfg, value):
+def parse_families(cfg, value, flag="--author-family"):
     fams = [f.strip() for f in (value or "").split(",") if f.strip()]
     if not fams:
-        raise UsageError("--author-family is required (run detect-author, or pass it explicitly)")
+        hint = " (run detect-author, or pass it explicitly)" if flag == "--author-family" else ""
+        raise UsageError(f"{flag} names no family{hint}")
     unknown = [f for f in fams if f not in cfg["families"]]
     if unknown:
-        raise UsageError(f"unknown author family {', '.join(unknown)}; known: {', '.join(cfg['families'])}")
+        raise UsageError(f"{flag}: unknown author family {', '.join(unknown)}; known: {', '.join(cfg['families'])}")
     return sorted(set(fams))
 
 
 # --- git inputs -------------------------------------------------------------
 
 def read_text(path):
+    """Every input file goes through here: unreadable is exit 2, never 1.
+
+    UnicodeDecodeError is a ValueError, not an OSError, so catching OSError
+    alone let a non-UTF-8 file escape as a traceback, which exits 1, the code
+    for "not clean" (PR #73). Strict decoding, so bad bytes are refused rather
+    than silently replaced in a path that a hold pattern must match.
+    """
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             return fh.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise UsageError(f"cannot read {path}: {exc}")
 
 
@@ -149,7 +157,9 @@ def changed_files(args):
         # .github/workflows/ci.yml out of .github/ would read as an ordinary
         # change. Without it, both the deleted and the added path are listed.
         out = git("diff", "--name-only", "--no-renames", "-z", f"{args.base}...HEAD")
-        return [p for p in out.decode().split("\0") if p]
+        # fsdecode, as the OS does: a path need not be UTF-8, and its ASCII
+        # prefix (.github/, scripts/) must still match a hold pattern.
+        return [os.fsdecode(p) for p in out.split(b"\0") if p]
     raise UsageError("pass --base <ref> or --changed-files <path>")
 
 
@@ -160,7 +170,7 @@ def repo_root(args):
     if args.repo_root:
         return args.repo_root
     if args.base:
-        return git("rev-parse", "--show-toplevel").decode().strip()
+        return os.fsdecode(git("rev-parse", "--show-toplevel").strip())
     return None
 
 
@@ -174,13 +184,9 @@ def repo_hold_patterns(root):
     if not root:
         return []
     path = os.path.join(root, REPO_HOLD_FILE)
-    try:
-        with open(path) as fh:
-            lines = [l.strip() for l in fh.read().split("\n")]
-    except FileNotFoundError:
+    if not os.path.exists(path):
         return []
-    except OSError as exc:
-        raise UsageError(f"cannot read {path}: {exc}")
+    lines = [l.strip() for l in read_text(path).split("\n")]
     try:
         return [re.compile(l) for l in lines if l and not l.startswith("#")]
     except re.error as exc:
@@ -216,7 +222,7 @@ def cmd_detect_author(cfg, args):
     # If no trailer names anyone, the branch's real author is unknown, and
     # "--also me" would quietly turn that into "only me" and let the actual
     # author's family review its own work (Devin, PR #73).
-    also = parse_families(cfg, args.also) if args.also else []
+    also = parse_families(cfg, args.also, "--also") if args.also is not None else []
     trailers = families_in_text(cfg, text)
     if not trailers:
         # Unknown is not "any family": guessing here is exactly how a branch
