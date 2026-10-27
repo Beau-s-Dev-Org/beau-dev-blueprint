@@ -77,6 +77,12 @@ class DetectAuthor(Base):
         self.assertIn("unknown author family", err)
         self.assertEqual(code, 2)
 
+    def test_an_empty_trailer_does_not_take_the_next_line_as_its_author(self):
+        code, out, _ = self.run_cli("detect-author", "--log-file", self.log(
+            "fix: y\n\nCo-Authored-By:\n\nsome claude body text\n"))
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["families"], [])
+
     def test_detect_author_ignores_family_names_outside_trailers(self):
         code, out, _ = self.run_cli("detect-author", "--log-file", self.log(
             "chore: bump the claude and gemini clients\n"))

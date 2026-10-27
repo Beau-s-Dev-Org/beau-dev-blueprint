@@ -18,7 +18,9 @@ def changed_files(args):
     if args.changed_files:
         # Unreadable input is a usage error (exit 2). An uncaught OSError would
         # exit 1, which the coordinator reads as "not clean".
-        return [line for line in read_text(args.changed_files).split("\n") if line]
+        # CRLF normalised: "path\r" fails every anchored hold pattern.
+        lines = read_text(args.changed_files).replace("\r\n", "\n").split("\n")
+        return [line for line in lines if line]
     if args.base:
         # -z: a path may legally contain a newline. --no-renames: with rename
         # detection on, a rename reports only its DESTINATION, so moving
@@ -69,9 +71,9 @@ def repo_hold_patterns(root):
     text = read_text(path, missing_ok=True)
     if text is None:
         return []
-    lines = [l.strip() for l in text.split("\n")]
+    lines = [line.strip() for line in text.split("\n")]
     try:
-        return [re.compile(l) for l in lines if l and not l.startswith("#")]
+        return [re.compile(line) for line in lines if line and not line.startswith("#")]
     except re.error as exc:
         raise UsageError(f"bad pattern in {path}: {exc}") from exc
 

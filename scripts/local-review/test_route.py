@@ -116,7 +116,8 @@ class RepoHoldPaths(Base):
         for path in ("scripts/test-ocr-completeness.sh", "scripts/audit-ocr-completeness-states.py",
                      "scripts/rollout-ocr.sh", "scripts/requirements.txt",
                      "codex-template.md", ".gitignore-template",
-                     "docs/AI-COLLABORATOR-GUIDE-template.md", "docs/PROPOSAL-FORMAT.md"):
+                     "docs/AI-COLLABORATOR-GUIDE-template.md", "docs/PROPOSAL-FORMAT.md",
+                     "docs/GEMINI-GUIDE-template.md", "AGENTS-template"):   # future templates too
             self.assertEqual(self.tier(root, path), (0, "hold"), path)
 
     def test_a_missing_repo_root_is_an_error_not_no_policy(self):

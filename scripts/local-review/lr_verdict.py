@@ -88,10 +88,10 @@ def markdown(result, rounds):
     short = result["commit"][:12]
     lines = ["## Local review", ""]
     if result["clean"]:
-        lines.append(f"**Result: clean.** {len(result['clean_families'])} of "
-                     f"{result['required_clean_families']} required non-author famil"
-                     f"{'y' if result['required_clean_families'] == 1 else 'ies'} "
-                     f"({', '.join(result['clean_families'])}) found no P1/P2 on `{short}`.")
+        n = len(result["clean_families"])
+        lines.append(f"**Result: clean.** {n} non-author famil{'y' if n == 1 else 'ies'} "
+                     f"({', '.join(result['clean_families'])}) found no P1/P2 on `{short}` "
+                     f"({result['required_clean_families']} required).")
     else:
         lines.append(f"**Result: not clean** on `{short}`.")
     meta = [f"Author family: {', '.join(result['author_families'])}", f"Tier: {result['tier']}"]

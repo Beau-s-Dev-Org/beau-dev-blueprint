@@ -22,7 +22,9 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 def is_sha(value):
     return isinstance(value, str) and SHA_RE.fullmatch(value.lower()) is not None
-TRAILER_RE = re.compile(r"^\s*co-authored-by:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+# [ \t], not \s: \s matches newlines, so an empty trailer took the NEXT line
+# (any body text) as its co-author.
+TRAILER_RE = re.compile(r"^[ \t]*co-authored-by:[ \t]*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
 class UsageError(Exception):

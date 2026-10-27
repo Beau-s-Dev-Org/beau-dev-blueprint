@@ -174,6 +174,25 @@ class Verdict(Base):
         self.assertEqual(v["invalid"], [])
         self.assertEqual(v["blocking"][0]["title"], title)
 
+    def test_crlf_changed_files_still_match_hold_paths(self):
+        path = os.path.join(self.tmp, "crlf.txt")
+        with open(path, "w", newline="") as fh:
+            fh.write("README.md\r\n.github/workflows/ci.yml\r\n")
+        code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
+                                    "--changed-files", path, self.result("codex"))
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["tier"], "hold")
+
+    def test_clean_headline_counts_clean_families_not_a_ratio(self):
+        code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
+                                    "--changed-files", self.files("src/app.py"), "--markdown",
+                                    self.result("codex"),
+                                    self.result("antigravity", model="gemini-pro"))
+        self.assertEqual(code, 0)
+        self.assertIn("2 non-author families (google, openai) found no P1/P2", out)
+        self.assertIn("(1 required)", out)
+        self.assertNotIn("2 of 1", out)
+
     def test_markdown_section_for_a_clean_branch(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
                                     "--changed-files", self.files("src/app.py"), "--markdown",
