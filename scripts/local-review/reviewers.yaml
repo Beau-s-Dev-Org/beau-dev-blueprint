@@ -69,6 +69,8 @@ hold_paths:
   - '^\.skills/'
   - '^templates/'
   - '(^|/)(CLAUDE|AGENTS)(-template)?\.md$'
+  # A repo's own hold list. Editing it can weaken the gate, so it is held too.
+  - '(^|/)\.local-review-hold-paths$'
   - '(^|/)(CODEOWNERS|LICENSE[^/]*|REUSE\.toml)$'
   - '(?i)auth|rbac|identity|security|quarantine|secret|credential|licen[cs]e|migration'
 

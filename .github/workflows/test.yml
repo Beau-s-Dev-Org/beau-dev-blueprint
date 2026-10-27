@@ -16,12 +16,14 @@ on:
       - '.github/workflows/ocr-review.yml'
       - '.github/workflows/test.yml'
       - 'scripts/**'
+      - '.local-review-hold-paths'
   push:
     branches: [main]
     paths:
       - '.github/workflows/ocr-review.yml'
       - '.github/workflows/test.yml'
       - 'scripts/**'
+      - '.local-review-hold-paths'
   workflow_dispatch:
 
 # One run per ref; a superseded push has nothing left to prove.

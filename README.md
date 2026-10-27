@@ -74,7 +74,9 @@ gate. Flow and rules: [`.skills/local-review/SKILL.md`](.skills/local-review/SKI
   closed on anything it cannot read. Tests:
   `python3 -m unittest discover -s scripts/local-review -v`.
 - **Clean** means no P1/P2 on the head commit from one non-author family, or two
-  on hold-for-Beau paths.
+  on hold-for-Beau paths. A repo adds its own hold-for-Beau paths in a root
+  `.local-review-hold-paths` file (one regex per line); the blueprint's holds all
+  of `scripts/`.
 - **No local OpenRouter fallback.** If no subscription reviewer can run, the PR
   opens anyway and OCR runs the rounds.
 

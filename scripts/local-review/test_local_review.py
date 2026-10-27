@@ -15,6 +15,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -315,6 +316,70 @@ class Verdict(Base):
         self.assertEqual(code, 0)
         self.assertIn("**Result: clean.**", out)
         self.assertIn("OCR runs next as the final gate.", out)
+
+
+class RepoHoldPaths(Base):
+    """The per-repo hold list, and the real git path inventory."""
+
+    def tier(self, root, *paths):
+        code, out, err = self.run_cli("route", "--author-family", "anthropic", "--no-advance",
+                                      "--changed-files", self.files(*paths),
+                                      "--repo-root", root, "--state-file", self.state)
+        return code, (json.loads(out)["tier"] if code == 0 else err)
+
+    def hold_file(self, text):
+        with open(os.path.join(self.tmp, ".local-review-hold-paths"), "w") as fh:
+            fh.write(text)
+
+    def test_repo_file_puts_its_paths_on_hold(self):
+        self.assertEqual(self.tier(self.tmp, "scripts/build.sh"), (0, "standard"))
+        self.hold_file("# comment\n\n^scripts/\n")
+        self.assertEqual(self.tier(self.tmp, "scripts/build.sh"), (0, "hold"))
+
+    def test_blueprint_holds_its_ocr_gate_scripts(self):
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        for path in ("scripts/test-ocr-completeness.sh", "scripts/audit-ocr-completeness-states.py",
+                     "scripts/rollout-ocr.sh", "scripts/requirements.txt"):
+            self.assertEqual(self.tier(root, path), (0, "hold"), path)
+
+    def test_repo_hold_file_rejects_a_bad_pattern(self):
+        self.hold_file("^scripts/(\n")
+        code, err = self.tier(self.tmp, "x")
+        self.assertEqual(code, 2)
+        self.assertIn("bad pattern", err)
+
+    def test_editing_the_repo_hold_file_is_itself_on_hold(self):
+        self.assertEqual(self.tier(self.tmp, ".local-review-hold-paths"), (0, "hold"))
+
+    def test_route_rejects_a_rename_out_of_a_hold_path_as_standard(self):
+        # Real git: rename detection would report only archive/ci.yml.
+        repo = os.path.join(self.tmp, "repo")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+        def git(*a):
+            subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True, env=env)
+
+        os.makedirs(os.path.join(repo, ".github", "workflows"))
+        with open(os.path.join(repo, ".github", "workflows", "ci.yml"), "w") as fh:
+            fh.write("name: ci\non: push\njobs: {}\n")
+        git("init", "-q", "-b", "main")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+        git("checkout", "-qb", "feature")
+        os.makedirs(os.path.join(repo, "archive"))
+        git("mv", ".github/workflows/ci.yml", "archive/ci.yml")
+        git("commit", "-qm", "move")
+        cwd = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, cwd)
+        code, out, _ = self.run_cli("route", "--author-family", "anthropic", "--base", "main",
+                                    "--no-advance", "--state-file", self.state)
+        self.assertEqual(code, 0)
+        plan = json.loads(out)
+        self.assertEqual(plan["tier"], "hold")
+        self.assertIn(".github/workflows/ci.yml", plan["hold_paths_matched"])
 
 
 class Config(Base):

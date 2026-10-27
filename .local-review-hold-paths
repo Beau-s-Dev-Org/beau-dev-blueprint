@@ -1,0 +1,9 @@
+# Hold-for-Beau paths specific to this repo, one Python regex per line, read by
+# scripts/local-review/local_review.py on top of the shared list in
+# scripts/local-review/reviewers.yaml. A change matching any line needs two
+# non-author model families to come back clean before the PR opens.
+#
+# In the blueprint, everything under scripts/ is review or merge pipeline: the
+# OCR completeness tests and audit, the rollout script that re-stamps every
+# consuming repo's pin, and local review itself.
+^scripts/

@@ -38,7 +38,8 @@ the final gate, so it should usually pass on its first run.
    `.skills/local-review/`). Orca runs reviewers from a **different model
    family** than the author, and the author fixes their findings round by round.
 2. A branch is **clean** when no reviewer finds a P1/P2 on the head commit:
-   one non-author family normally, two on hold-for-Beau paths.
+   one non-author family normally, two on hold-for-Beau paths. List this repo's
+   own pipeline paths in `.local-review-hold-paths` at the repo root.
    `scripts/local-review/local_review.py verdict` decides this, not the agent.
 3. Only then open the PR, with the verdict's **Local review** section in the
    body. Pushing the branch earlier for backup is fine. OCR runs only on PR

@@ -124,14 +124,52 @@ def changed_files(args):
         with open(args.changed_files) as fh:
             return [line for line in fh.read().split("\n") if line]
     if args.base:
-        # -z: a path may legally contain a newline.
-        out = git("diff", "--name-only", "-z", f"{args.base}...HEAD")
+        # -z: a path may legally contain a newline. --no-renames: with rename
+        # detection on, a rename reports only its DESTINATION, so moving
+        # .github/workflows/ci.yml out of .github/ would read as an ordinary
+        # change. Without it, both the deleted and the added path are listed.
+        out = git("diff", "--name-only", "--no-renames", "-z", f"{args.base}...HEAD")
         return [p for p in out.decode().split("\0") if p]
     raise UsageError("pass --base <ref> or --changed-files <path>")
 
 
-def tier_for(cfg, files):
-    matched = sorted({f for f in files for rx in cfg["_hold_re"] if rx.search(f)})
+REPO_HOLD_FILE = ".local-review-hold-paths"
+
+
+def repo_root(args):
+    if args.repo_root:
+        return args.repo_root
+    if args.base:
+        return git("rev-parse", "--show-toplevel").decode().strip()
+    return None
+
+
+def repo_hold_patterns(root):
+    """The repo's own hold-for-Beau paths, one regex per line.
+
+    The shared list in reviewers.yaml cannot know which files are review or
+    merge pipeline in a given repo (in the blueprint, everything under
+    scripts/ is). A repo states that in this file; a missing file adds nothing.
+    """
+    if not root:
+        return []
+    path = os.path.join(root, REPO_HOLD_FILE)
+    try:
+        with open(path) as fh:
+            lines = [l.strip() for l in fh.read().split("\n")]
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise UsageError(f"cannot read {path}: {exc}")
+    try:
+        return [re.compile(l) for l in lines if l and not l.startswith("#")]
+    except re.error as exc:
+        raise UsageError(f"bad pattern in {path}: {exc}")
+
+
+def tier_for(cfg, files, root=None):
+    patterns = cfg["_hold_re"] + repo_hold_patterns(root)
+    matched = sorted({f for f in files for rx in patterns if rx.search(f)})
     return ("hold" if matched else "standard"), matched
 
 
@@ -198,7 +236,7 @@ def write_pointer(path, value):
 
 def cmd_route(cfg, args):
     authors = parse_families(cfg, args.author_family)
-    tier, matched = tier_for(cfg, changed_files(args))
+    tier, matched = tier_for(cfg, changed_files(args), repo_root(args))
     required = 2 if tier == "hold" else 1
 
     eligible = [r for r in cfg["reviewers"] if r["enabled"] and r["family"] not in authors]
@@ -336,7 +374,7 @@ def cmd_verdict(cfg, args):
     commit = (args.commit or "").lower()
     if not SHA_RE.match(commit):
         raise UsageError("--commit must be the full 40-character head SHA")
-    tier, _ = tier_for(cfg, changed_files(args))
+    tier, _ = tier_for(cfg, changed_files(args), repo_root(args))
     required = 2 if tier == "hold" else 1
 
     a = assess(cfg, authors, commit, args.results)
@@ -375,6 +413,7 @@ def main(argv=None):
     def files_args(sp):
         sp.add_argument("--base", help="diff base ref, e.g. origin/main")
         sp.add_argument("--changed-files", help="newline-separated changed paths instead of git diff")
+        sp.add_argument("--repo-root", help=f"where to find {REPO_HOLD_FILE} (default: the git toplevel when --base is used)")
 
     r = sub.add_parser("route", help="ordered cross-family reviewer candidates")
     r.add_argument("--author-family", required=True)
