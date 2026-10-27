@@ -63,9 +63,13 @@ def load_config(path):
     if not isinstance(cfg, dict) or cfg.get("schema") != CONFIG_SCHEMA:
         raise UsageError(f"config {path} is not {CONFIG_SCHEMA}")
 
+    # Every field is type-checked before it is used. A wrong-typed value used
+    # to reach a regex call or a set lookup and raise TypeError, which exits 1:
+    # the code for "not clean", not the code for "bad config" (PR #73, twice).
     families = cfg.get("families")
-    if not isinstance(families, dict) or not families:
-        raise UsageError("config has no families")
+    if not isinstance(families, dict) or not families \
+            or not all(isinstance(k, str) and k and isinstance(v, str) for k, v in families.items()):
+        raise UsageError("families must be a non-empty mapping of family name to regex string")
     try:
         cfg["_family_re"] = {name: re.compile(pat) for name, pat in families.items()}
     except (re.error, TypeError) as exc:
@@ -81,10 +85,16 @@ def load_config(path):
         if r["id"] in seen:
             raise UsageError(f"duplicate reviewer id {r['id']}")
         seen.add(r["id"])
-        if r.get("family") not in families:
+        if not isinstance(r.get("family"), str) or r["family"] not in families:
             raise UsageError(f"reviewer {r['id']} has unknown family {r.get('family')!r}")
         if not isinstance(r.get("agent"), str) or not r["agent"]:
             raise UsageError(f"reviewer {r['id']} has no Orca agent id")
+        if r.get("model") is not None and not isinstance(r["model"], str):
+            raise UsageError(f"reviewer {r['id']} has a non-string model {r['model']!r}")
+        for flag in ("enabled", "multi_provider"):
+            # A quoted 'false' is a truthy string; refuse it rather than guess.
+            if r.get(flag) is not None and not isinstance(r[flag], bool):
+                raise UsageError(f"reviewer {r['id']}: {flag} must be true or false, not {r[flag]!r}")
         r["model"] = r.get("model") or ""
         r["enabled"] = r.get("enabled") is True
         r["multi_provider"] = r.get("multi_provider") is True
@@ -105,7 +115,8 @@ def load_config(path):
         cfg["_hold_re"] = [re.compile(p) for p in hold]
     except (re.error, TypeError) as exc:
         raise UsageError(f"bad hold_paths pattern: {exc}")
-    if not isinstance(cfg.get("max_rounds", 5), int) or cfg.get("max_rounds", 5) < 1:
+    rounds = cfg.get("max_rounds", 5)
+    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
         raise UsageError("max_rounds must be a positive integer")
     return cfg
 
@@ -174,11 +185,21 @@ REPO_HOLD_FILE = ".local-review-hold-paths"
 
 
 def repo_root(args):
+    """Where the repo's own hold list lives.
+
+    Found from git whenever possible, not only with --base: with
+    --changed-files it used to be skipped, so the repo's hold paths silently
+    did not apply (PR #73). Outside a git checkout, with no --repo-root, there
+    is no repo hold list to read.
+    """
     if args.repo_root:
         return args.repo_root
-    if args.base:
+    try:
         return os.fsdecode(git("rev-parse", "--show-toplevel").strip())
-    return None
+    except UsageError:
+        if args.base:
+            raise
+        return None
 
 
 def repo_hold_patterns(root):

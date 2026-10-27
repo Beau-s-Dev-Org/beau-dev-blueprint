@@ -7,3 +7,8 @@
 # OCR completeness tests and audit, the rollout script that re-stamps every
 # consuming repo's pin, and local review itself.
 ^scripts/
+# Project templates stamped into every consuming repo: a change here changes
+# their agent rules and ignores fleet-wide.
+^codex-template\.md$
+^\.gitignore-template$
+^docs/AI-COLLABORATOR-GUIDE-template\.md$

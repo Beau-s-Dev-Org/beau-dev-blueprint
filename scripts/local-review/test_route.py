@@ -74,7 +74,8 @@ class Route(Base):
         self.assertEqual(firsts, ["codex", "antigravity", "codex"])
 
     def test_no_advance_leaves_rotation_alone(self):
-        self.route("anthropic", "--no-advance")
+        code, _, _ = self.route("anthropic", "--no-advance")
+        self.assertEqual(code, 0)
         self.assertFalse(os.path.exists(self.state))
         self.assertEqual(self.route("anthropic")[1]["candidates"][0]["id"], "codex")
 
@@ -139,6 +140,21 @@ class RepoHoldPaths(Base):
         self.addCleanup(os.chmod, root, 0o700)
         code, err = self.tier(root, "copy/home.md")
         self.assertEqual(code, 2)
+
+    def test_repo_hold_file_applies_with_changed_files_inside_git(self):
+        # --changed-files without --repo-root used to skip the repo's hold list.
+        repo = os.path.join(self.tmp, "repo")
+        os.mkdir(repo)
+        subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        with open(os.path.join(repo, ".local-review-hold-paths"), "w") as fh:
+            fh.write("^copy/\n")
+        os.chdir(repo)
+        code, out, _ = self.run_cli("route", "--author-family", "anthropic", "--no-advance",
+                                    "--changed-files", self.files("copy/home.md"),
+                                    "--state-file", self.state)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["tier"], "hold")
 
     def test_editing_the_repo_hold_file_is_itself_on_hold(self):
         self.assertEqual(self.tier(self.tmp, ".local-review-hold-paths"), (0, "hold"))
@@ -234,10 +250,27 @@ reviewers:
                                   "--reason", "x")
         self.assertEqual(code, 2)
 
-    def test_enabled_must_be_literally_true(self):
-        # `enabled: "false"` is a truthy string; it must not switch a reviewer on.
-        code, _ = self.load("  - {id: c, family: openai, agent: codex, enabled: 'false'}\n")
-        self.assertEqual(code, 3)
+    def test_config_rejects_wrong_typed_reviewer_fields(self):
+        # Each used to reach a regex call or set lookup and exit 1 ("not clean").
+        for entry in ("{id: c, family: [openai], agent: codex, enabled: true}",
+                      "{id: c, family: openai, agent: 7, enabled: true}",
+                      "{id: c, family: google, agent: cursor, multi_provider: true, model: 4, enabled: true}",
+                      "{id: c, family: google, agent: cursor, multi_provider: true, model: [gemini], enabled: true}",
+                      "{id: c, family: openai, agent: codex, enabled: 'false'}",
+                      "{id: c, family: openai, agent: codex, enabled: 1}",
+                      "{id: c, family: openai, agent: codex, multi_provider: 'yes', enabled: true}"):
+            code, err = self.load(f"  - {entry}\n")
+            self.assertEqual(code, 2, entry)
+            self.assertIn("reviewer c", err, entry)
+
+    def test_config_rejects_wrong_typed_families_and_max_rounds(self):
+        for text in (self.BASE.replace("families: {anthropic: 'claude', openai: 'gpt', google: 'gemini'}",
+                                       "families: {anthropic: 1}"),
+                     self.BASE.replace("families: {anthropic: 'claude', openai: 'gpt', google: 'gemini'}",
+                                       "families: [anthropic]"),
+                     self.BASE + "  - {id: c, family: openai, agent: codex, enabled: true}\nmax_rounds: true\n"):
+            code, _, _ = self.run_cli("--config", self.config(text), "unavailable", "--reason", "x")
+            self.assertEqual(code, 2, text)
 
 
 if __name__ == "__main__":

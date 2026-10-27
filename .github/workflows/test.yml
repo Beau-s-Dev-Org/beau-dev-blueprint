@@ -93,6 +93,16 @@ jobs:
             echo "::error::unittest discover ran no tests in scripts/local-review; the suite did not load."
             exit 1
           }
+          # Per module too: a renamed module leaves the others still printing
+          # "Ran N tests", and the gate green on a partial suite.
+          missing=
+          for module in test_detect_author test_route test_verdict; do
+            grep -qF "($module." "$RUNNER_TEMP/local-review-tests.log" || missing="$missing $module"
+          done
+          [ -z "$missing" ] || {
+            echo "::error::unittest discover did not run$missing; the gate would pass on a partial suite."
+            exit 1
+          }
 
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.

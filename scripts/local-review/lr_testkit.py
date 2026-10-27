@@ -19,7 +19,6 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -35,6 +34,11 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp)
+        # Run outside any git checkout, so the blueprint's own
+        # .local-review-hold-paths cannot leak into a test's tier.
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
         self.state = os.path.join(self.tmp, "state", "rotation.json")
         self.n = 0
 

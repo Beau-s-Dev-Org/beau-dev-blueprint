@@ -43,6 +43,7 @@ class DetectAuthor(Base):
         authors = ",".join(json.loads(out)["families"])
         self.assertEqual(authors, "anthropic,openai")
         code, plan, _ = self.route(authors, "--no-advance")
+        self.assertEqual(code, 0)
         self.assertEqual({c["family"] for c in plan["candidates"]}, {"google"})
 
     def test_detect_author_rejects_also_as_a_stand_in_for_an_unknown_author(self):
