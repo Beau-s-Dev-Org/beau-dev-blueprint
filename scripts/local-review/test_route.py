@@ -125,7 +125,9 @@ class RepoHoldPaths(Base):
                      "docs/GEMINI-GUIDE-template.md", "AGENTS-template",   # future templates too
                      "SPEC_TEMPLATE.md", "docs/spec_template.md", "PULL_REQUEST_TEMPLATE.md",
                      "pyproject-template.toml", "ocr-caller-template.yml", "foo_template.py",
-                     "Templates.json"):
+                     "Templates.json", "docs/templates/guide.md", "src/templates/email.html",
+                     "foo/template-copy/x.md", "docs/specs/PROPOSAL-FORMAT.md",
+                     "docs/proposal-format.md"):
             self.assertEqual(self.tier(root, path), (0, "hold"), path)
 
     def test_a_missing_repo_root_is_an_error_not_no_policy(self):

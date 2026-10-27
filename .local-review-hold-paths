@@ -10,9 +10,10 @@
 # Project templates stamped into every consuming repo: a change here changes
 # their agent rules and ignores fleet-wide. Matched by the naming convention,
 # not today's file list, so a template added later is held too.
-# Any filename containing "template", any case, separator or extension.
-# Narrower forms were patched three rounds running (suffix, then separator
-# and case, then extension); a false match costs one extra review round.
-(?i)(^|/)[^/]*template[^/]*$
+# "template" anywhere in the path, file or directory, any case. Narrower
+# forms were patched four rounds running (suffix; separator and case;
+# extension; directories), so this is the general case. A false match costs
+# one extra review round.
+(?i)template
 # The proposal spec the collaborator guide makes required reading.
-^docs/PROPOSAL-FORMAT\.md$
+(?i)(^|/)proposal-format\.md$
