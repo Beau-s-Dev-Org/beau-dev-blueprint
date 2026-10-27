@@ -56,11 +56,26 @@ homes = [[s.get("id") for s in j.get("steps", [])] for j in doc["jobs"].values()
          if any(s.get("id") == "limits" for s in j.get("steps", []))]
 if len(homes) != 1 or not all(a in homes[0] for a in attempt_ids):
     sys.exit("the limits step and all three review attempts are not in one job")
+# The job timeout must cover every step budget, or an attempt is cancelled
+# mid-review instead of failing inside a step that can report it.
+job = next(j for j in doc["jobs"].values()
+           if any(s.get("id") == "limits" for s in j.get("steps", [])))
+budgets = [s.get("timeout-minutes") for s in job.get("steps", [])]
+if any(not isinstance(b, int) for b in budgets):
+    sys.exit("a step in the review job has no timeout-minutes, so its reserve is unenforceable")
+if not isinstance(job.get("timeout-minutes"), int) or job["timeout-minutes"] < sum(budgets):
+    sys.exit(f"job timeout-minutes {job.get('timeout-minutes')!r} is below its step budgets' sum {sum(budgets)}")
 for a in attempt_ids:
     if homes[0].index("limits") > homes[0].index(a):
         sys.exit(f"the limits step does not run before {a}")
 if len(attempts) != 3:
     sys.exit(f"expected 3 review attempt steps, found {len(attempts)}")
+# The error output only helps if production posts it: a dropped or renamed
+# consumer would make a limits failure silent again.
+report = [s for s in steps if s.get("name") == "Report a limits error on the PR"]
+if (len(report) != 1
+        or (report[0].get("env") or {}).get("LIMITS_ERROR") != "${{ steps.limits.outputs.error }}"):
+    sys.exit("the limits step's error output is no longer posted to the PR")
 for s in attempts:
     # Gated explicitly, so a failed limits step cannot run an attempt with
     # empty inputs; and 60 minutes each, the budget the body's 50-minute
@@ -109,6 +124,10 @@ check() {
 
 read -r DEF_LLM DEF_TASK < "$WORK/defaults"
 check 0 "$DEF_LLM" "$DEF_TASK" 3 "shipped defaults pass (3 files) ($DEF_LLM s, $DEF_TASK min)" "" "$DEF_TASK $DEF_LLM"
+# Annotations land on every consuming PR, so their ABSENCE when nothing is
+# shortened is pinned too: an unconditional one would pass every case below.
+check 0 1200 25 3 "a small PR raises no warning"  "" "" "::warning::"
+check 0 1200 25 3 "a small PR emits no notice"    "" "" "::notice::"
 
 # Per-file deadline = min(configured, floor(50 / (waves of 8 * 2 rounds
 #   + 1 grouping request from 4 files))).
