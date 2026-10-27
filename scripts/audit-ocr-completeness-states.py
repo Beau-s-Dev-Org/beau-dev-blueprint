@@ -46,7 +46,10 @@ ENV = {**os.environ, "PATH": f"{WORK}/bin:" + os.environ["PATH"], "GH_TOKEN": "x
        "PR_NUMBER": "1", "REPO": "o/r", "RUN_URL": "http://r",
        "OCR_RESULT_FILE": str(WORK / "result.json"),
        "OCR_COMMENT_FILE": str(WORK / "comment.md"),
-       "GITHUB_STEP_SUMMARY": str(WORK / "summary.md")}
+       "GITHUB_STEP_SUMMARY": str(WORK / "summary.md"),
+       # The workflow always sets it; the step's default is fail-closed.
+       # These states are about the result file, so an attempt succeeded.
+       "ATTEMPT_SUCCEEDED": "true"}
 
 
 def run(doc, env=None, raw=None):

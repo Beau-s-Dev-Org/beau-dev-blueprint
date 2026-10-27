@@ -54,8 +54,12 @@ if cond != "!cancelled() && steps.limits.outcome == 'success' && steps.ocr-prima
 # continue-on-error keeps a failed primary from failing the job outright, so
 # the fallbacks can run; !cancelled() above is what lets the gate run after
 # any failed step.
+attempt_ids = {"ocr-primary", "ocr-fallback1", "ocr-fallback2"}
+found = {s.get("id") for s in steps if s.get("id") in attempt_ids}
+if found != attempt_ids:
+    sys.exit(f"attempt steps found: {sorted(found)}, expected {sorted(attempt_ids)}")
 for s in steps:
-    if s.get("id") in ("ocr-primary", "ocr-fallback1", "ocr-fallback2") \
+    if s.get("id") in attempt_ids \
             and s.get("continue-on-error") not in (True, "true"):
         sys.exit(f"attempt {s.get('id')} is not continue-on-error, so a failure would skip the fallbacks")
 PY
@@ -100,6 +104,9 @@ GHEOF
 chmod +x "$WORK/bin/gh"
 
 PASS=0; FAIL=0
+# Actions always sets this on the gate; the default is fail-closed, so every
+# case runs as "an attempt succeeded" unless it says otherwise.
+export ATTEMPT_SUCCEEDED=true
 run_case() {  # name, expected_exit, result-json-or-NONE, expected substring
   local name="$1" want="$2" json="$3" needle="$4"
   : > "$WORK/summary.md"; : > "$WORK/gh.log"; : > "$WORK/comment.md"
@@ -251,9 +258,9 @@ run_case "  ...and reports the reason"             1 "$PARTIAL"           "file 
 run_case "  ...and says how much was covered"      1 "$PARTIAL"           "1 of 3"
 run_case "a review where every file failed fails"  1 "$ALL_FAILED"        "covered 0 of 3"
 run_case "  ...and names the files"               1 "$ALL_FAILED"        'OCR did not review `a.py`'
-run_case "a failed run with nothing selected fails" 1 "$FAILED_EMPTY"     "A partial review is not an approval"
-run_case "  ...status failed alone is enough"      1 "$FAILED_STATUS_ONLY" "A partial review is not an approval"
-run_case "  ...terminal_state failed alone too"    1 "$FAILED_TERMINAL_ONLY" "A partial review is not an approval"
+run_case "a failed run with nothing selected fails" 1 "$FAILED_EMPTY"     "did not finish"
+run_case "  ...status failed alone is enough"      1 "$FAILED_STATUS_ONLY" "did not finish"
+run_case "  ...terminal_state failed alone too"    1 "$FAILED_TERMINAL_ONLY" "did not finish"
 run_case "a complete review passes"                0 "$COMPLETE"          "reviewed every item it selected"
 run_case "the shape OCR actually emits passes"     0 "$REAL_SHAPE"        "reviewed every item it selected"
 run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED'
@@ -267,8 +274,8 @@ run_case "an empty result file abstains"           0 ""                   "could
 run_case "an unparseable result abstains"          0 "$PARTIAL_NOT_JSON"  "could not be verified"
 run_case "a scalar manifest abstains"              0 "$SCALAR_MANIFEST"   "could not be verified"
 run_case "an array root abstains"                  0 "$ARRAY_ROOT"        "could not be verified"
-run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY"     "A partial review is not an approval"
-run_case "status alone is enough"                  1 "$STATUS_ONLY"       "A partial review is not an approval"
+run_case "terminal_state alone is enough"          1 "$TERMINAL_ONLY"     "although its result covers all 3 selected files"
+run_case "status alone is enough"                  1 "$STATUS_ONLY"       "although its result covers all 3 selected files"
 run_case "a failed item alone is enough"           1 "$FAILED_ONLY"       "A partial review is not an approval"
 run_case "a path with spaces survives"             1 "$SPACES"            'docs/my notes.md'
 run_case "skipped WITH selected files fails"       1 "$SKIPPED_WITH_SEL"  "A partial review is not an approval"
@@ -299,7 +306,7 @@ run_case "partial outranks a malformed coverage"  1 "$PARTIAL_BAD_COVERAGE" "A p
 run_case "partial outranks an unknown schema"     1 "$PARTIAL_BAD_SCHEMA"  "A partial review is not an approval"
 run_case "failed outranks a malformed coverage"   1 "$FAILED_BAD_COVERAGE" "reported itself incomplete"
 run_case "failed outranks an unknown schema"      1 "$FAILED_BAD_SCHEMA"  "reported itself incomplete"
-run_case "a failed run that covered everything fails" 1 "$FAILED_BUT_COMPLETE" "reported itself incomplete without naming"
+run_case "a failed run that covered everything fails" 1 "$FAILED_BUT_COMPLETE" "although its result covers all 3 selected files"
 run_case "partial outranks an empty selection"    1 "$EMPTY_BUT_PARTIAL" "A partial review is not an approval"
 run_case "  ...and admits it named nothing"       1 "$EMPTY_BUT_PARTIAL" "without naming which items"
 run_case "a failed item outranks an empty set"    1 "$EMPTY_BUT_FAILED"  'OCR did not review `x.py`'
@@ -338,7 +345,7 @@ fi
 # otherwise exit green, each required to exit 0 (the fail-gate, not this
 # step, reddens the job) and to post the failed-attempt notice.
 attempt_failed_case() {  # name, result-json-or-NONE
-  : > "$WORK/gh.log"; : > "$WORK/comment.md"
+  : > "$WORK/summary.md"; : > "$WORK/gh.log"; : > "$WORK/comment.md"
   if [ "$2" = "NONE" ]; then rm -f "$WORK/result.json"; else printf '%s' "$2" > "$WORK/result.json"; fi
   PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
     OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
@@ -355,6 +362,32 @@ attempt_failed_case "failed attempt, no result: not green"            NONE
 attempt_failed_case "failed attempt, invalid result: not green"       "not json"
 attempt_failed_case "failed attempt, complete result: not green"      "$COMPLETE"
 attempt_failed_case "failed attempt, nothing selected: not green"     "$SKIPPED_EMPTY"
+attempt_failed_case "failed attempt, failed status, full coverage"    "$FAILED_BUT_COMPLETE"
+# Fail-closed: with ATTEMPT_SUCCEEDED missing (a renamed or dropped env line)
+# a complete result must not clear the notice green.
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$COMPLETE" > "$WORK/result.json"
+env -u ATTEMPT_SUCCEEDED PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
+if grep -q "did not complete" "$WORK/comment.md"; then
+  echo "  ok    a missing ATTEMPT_SUCCEEDED fails closed"; PASS=$((PASS+1))
+else
+  echo "  FAIL  a missing ATTEMPT_SUCCEEDED let a complete result through green"; FAIL=$((FAIL+1))
+fi
+# The #73 bug was an older notice left standing: the failed-attempt notice must
+# REPLACE the bot's earlier comment, not add one, and never touch a human's.
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$COMPLETE" > "$WORK/result.json"
+PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+  OCR_FAKE_PRIOR_COMMENT=1 OCR_RESULT_FILE="$WORK/result.json" \
+  OCR_COMMENT_FILE="$WORK/comment.md" GITHUB_STEP_SUMMARY="$WORK/summary.md" ATTEMPT_SUCCEEDED=false \
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 0 ] && grep -q "PATCH" "$WORK/gh.log" && grep -q "issues/comments/4242 " "$WORK/gh.log" \
+   && ! grep -q "issues/comments/999 " "$WORK/gh.log" && ! grep -q "pr comment" "$WORK/gh.log" \
+   && grep -q "did not complete" "$WORK/comment.md"; then
+  echo "  ok    a failed attempt replaces the bot's earlier notice"; PASS=$((PASS+1))
+else
+  echo "  FAIL  a failed attempt did not replace the earlier notice (exit $rc)"; sed 's/^/        /' "$WORK/gh.log"; FAIL=$((FAIL+1))
+fi
 # ...while an incomplete result still fails this step itself, as before.
 : > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
 PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \

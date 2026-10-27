@@ -723,7 +723,7 @@ jobs:
               upsert_gate_comment
               exit 1
             fi
-            [ "${ATTEMPT_SUCCEEDED:-true}" = "true" ] \
+            [ "${ATTEMPT_SUCCEEDED:-false}" = "true" ] \
               || attempt_failed "no review attempt succeeded and $1, so no review of this PR exists"
             echo "::warning::OCR completeness could not be verified: $1. Treat this check as 'unknown', not 'passed'."
             echo "⚠️ OCR completeness could not be verified ($1)." >> "$GITHUB_STEP_SUMMARY"
@@ -801,7 +801,7 @@ jobs:
           # genuinely nothing to review — a Markdown-only diff, say. That is a
           # true "nothing to approve", not silence.
           if [ "$INCOMPLETE" = "no" ] && [ "${N_SELECTED:-0}" -eq 0 ]; then
-            [ "${ATTEMPT_SUCCEEDED:-true}" = "true" ] \
+            [ "${ATTEMPT_SUCCEEDED:-false}" = "true" ] \
               || attempt_failed "its result shows no files selected, but the attempt itself failed"
             echo "OCR selected no files for review (status: ${STATUS:-?}); there is nothing for this gate to withhold."
             echo "ℹ️ OCR selected no files for review — nothing to approve or withhold." >> "$GITHUB_STEP_SUMMARY"
@@ -812,11 +812,38 @@ jobs:
           if [ "$INCOMPLETE" = "no" ]; then
             # e.g. OCR finished, then the action failed while posting: the
             # result is complete but its findings may never have reached the PR.
-            [ "${ATTEMPT_SUCCEEDED:-true}" = "true" ] \
+            [ "${ATTEMPT_SUCCEEDED:-false}" = "true" ] \
               || attempt_failed "its result covers all ${N_SELECTED} selected files, but the attempt failed afterwards, so its findings may not have reached this PR"
             echo "OCR reviewed every item it selected (${N_COVERED} of ${N_SELECTED})."
             clear_gate_comment "reviewed every item it selected (${N_COVERED} of ${N_SELECTED})"
             exit 0
+          fi
+
+          # Coverage is full and nothing failed, yet OCR itself said "failed"
+          # or "partial": only the declaration makes this incomplete, so there
+          # is no file list to give. Say exactly that instead of listing
+          # "files never read" that the result says were read.
+          if [ "$(jq '.manifest.coverage.failed | length' "$RESULT")" -eq 0 ] \
+             && [ "${N_COVERED:-0}" -eq "${N_SELECTED:-0}" ] && [ "${N_SELECTED:-0}" -gt 0 ]; then
+            [ "${ATTEMPT_SUCCEEDED:-false}" = "true" ] \
+              || attempt_failed "OCR reported itself ${STATUS:-?} although its result covers all ${N_SELECTED} selected files, so its findings may not have reached this PR"
+            echo "::error::OCR reported itself incomplete (status: ${STATUS:-?}, terminal_state: ${TERMINAL:-?}) although its result covers all ${N_SELECTED} selected files. Not an approval: re-run the review."
+            echo "❌ OCR reported itself incomplete (status: ${STATUS:-?}) although it covered all ${N_SELECTED} selected files." >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "${PR_NUMBER:-}" ]; then
+              {
+                echo "$GATE_MARKER"
+                echo "## ❌ OpenCodeReview did not finish"
+                echo
+                echo "OCR reported itself **incomplete** (status: \`${STATUS:-?}\`, terminal_state: \`${TERMINAL:-?}\`)"
+                echo "although its result lists all ${N_SELECTED} selected files as reviewed. By its own"
+                echo "verdict the review did not finish, so it is not an approval. Re-run by"
+                echo "commenting \`/open-code-review\`."
+                echo
+                echo "<sub>[Run log](${RUN_URL})</sub>"
+              } > "${OCR_COMMENT_FILE:-/tmp/ocr-incomplete.md}"
+              upsert_gate_comment
+            fi
+            exit 1
           fi
 
           # Failed entries carry a reason; an unaccounted one exists in no

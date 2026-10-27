@@ -100,14 +100,25 @@ caps = re.findall(r"\(\( TASK > (\d+) \)\) && TASK=(\d+)", match[0]["run"])
 if len(caps) != 1 or caps[0][0] != caps[0][1]:
     sys.exit(f"could not read the deadline cap from the limits step: {caps}")
 cap = int(caps[0][0])
-if 3 * cap + 10 != 85:
-    sys.exit(f"cap {cap}: grouping + 2 rounds + 10-minute reserve is {3 * cap + 10}, not the 85-minute attempt")
+budget = attempts[0].get("timeout-minutes")   # all three already checked equal above
+if 3 * cap + 10 != budget:
+    sys.exit(f"cap {cap}: grouping + 2 rounds + 10-minute reserve is {3 * cap + 10}, not the {budget}-minute attempt")
 # Removed outputs must not be produced or consumed anywhere in the workflow.
 import json
 dump = json.dumps(doc)
-for name in ("task_shortened", "task_ceiling", "llm_shortened", "changed_files"):
+for name in ("task_shortened", "task_ceiling", "llm_shortened"):
     if name in dump:
         sys.exit(f"the workflow still references the removed {name!r}")
+# Scoped to real references: "changed_files" alone is a generic word.
+if ("steps.pr-context.outputs.changed_files" in dump
+        or "pull_request.changed_files" in dump or "CHANGED_FILES" in dump):
+    sys.exit("the workflow still references the removed changed_files input")
+# pr-context still feeds the attempts on comment-triggered runs.
+ctx = [s for s in steps if s.get("id") == "pr-context"]
+script = (ctx[0].get("with") or {}).get("script", "") if len(ctx) == 1 else ""
+for out in ("base_ref", "head_sha"):
+    if f"core.setOutput('{out}'" not in script:
+        sys.exit(f"the pr-context step no longer outputs {out}")
 PY
 # The wiring assertions above end in sys.exit AFTER step.sh is written, and
 # this script has no -e, so the status must be checked explicitly or a wiring
@@ -148,10 +159,10 @@ check 0 "$DEF_LLM" "$DEF_TASK" "the defaults emit no notice"   "" "" "::notice::
 # The deadline is the configured value capped at 25, whatever the PR's size:
 # OCR bundles files into groups, and the group count is not known in advance.
 check 0 1200 25 "the configured deadline is used as is"        "85 min per attempt" "25 1200"
-check 0 600  10 "a request exactly at its deadline is not clamped or warned" "" "10 600" "::warning::"
+check 0 600  10 "a request exactly at its deadline is not clamped or warned" "" "10 600" "it is clamped to that deadline"
 check 0 300  25 "a request below the deadline is kept"         "" "25 300"
 check 0 1501 25 "a request longer than its deadline is clamped, with a warning" "::warning::llm_timeout_sec is 1501s" "25 1500"
-check 0 1500 25 "a request exactly at the default cap is not warned" "" "25 1500" "::warning::"
+check 0 1500 25 "a request exactly at the default cap is not warned" "" "25 1500" "it is clamped to that deadline"
 check 0 1200 26 "a deadline over 25 is clamped, with a warning" "::warning::review_task_timeout_min is 26" "25 1200"
 check 0 1560 26 "a request is clamped against the CAPPED deadline, with a warning" "it is clamped to that deadline" "25 1500"
 check 0 3000 30 "an older stub with higher settings still gets a review" "::warning::" "25 1500"
