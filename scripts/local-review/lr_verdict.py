@@ -105,7 +105,10 @@ def markdown(result, rounds):
                      f"{'yes' if r['eligible'] else 'no'} | "
                      + " | ".join(str(r[s]) for s in SEVERITIES) + " |")
     for b in result["blocking"]:
-        where = f" ({cell(b['file'])}{':' + str(b['line']) if b.get('line') else ''})" if b.get("file") else ""
+        where = ""
+        if b.get("file"):
+            line = f":{cell(b['line'])}" if b.get("line") is not None else ""
+            where = f" ({cell(b['file'])}{line})"
         lines.append(f"- **{b['severity']}** from {cell(b['reviewer'])}: {cell(b['title'])}{where}")
     for i in result["invalid"]:
         lines.append(f"- Invalid result `{cell(os.path.basename(i['file']))}`: {cell(i['reason'])}")

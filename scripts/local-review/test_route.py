@@ -174,6 +174,21 @@ class RepoHoldPaths(Base):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["tier"], "hold")
 
+    def test_a_git_failure_other_than_not_a_repo_is_an_error(self):
+        # git missing from PATH: must not read as "no repo hold list".
+        empty = os.path.join(self.tmp, "nobin")
+        os.mkdir(empty)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = empty
+        try:
+            code, _, err = self.run_cli("route", "--author-family", "anthropic", "--no-advance",
+                                        "--changed-files", self.files("scripts/x.sh"),
+                                        "--state-file", self.state)
+        finally:
+            os.environ["PATH"] = old
+        self.assertEqual(code, 2)
+        self.assertIn("git rev-parse", err)
+
     def test_editing_the_repo_hold_file_is_itself_on_hold(self):
         self.assertEqual(self.tier(self.tmp, ".local-review-hold-paths"), (0, "hold"))
 

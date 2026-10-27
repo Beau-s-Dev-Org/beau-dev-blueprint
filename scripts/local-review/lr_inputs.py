@@ -8,7 +8,9 @@ from lr_config import UsageError, read_text
 
 def git(*args):
     try:
-        return subprocess.run(["git", *args], check=True, capture_output=True).stdout
+        # LC_ALL=C: repo_root() matches git's English error text.
+        env = {**os.environ, "LC_ALL": "C"}
+        return subprocess.run(["git", *args], check=True, capture_output=True, env=env).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = getattr(exc, "stderr", b"") or b""
         raise UsageError(f"git {' '.join(args)} failed: {detail.decode(errors='replace').strip() or exc}") from exc
@@ -48,8 +50,11 @@ def repo_root(args):
         return args.repo_root
     try:
         return os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\n"))   # only git's newline: a path may end in a space
-    except UsageError:
-        if args.base:
+    except UsageError as exc:
+        # Only "not a git repository" means there is no repo hold list. Git
+        # missing, dubious ownership or a broken repo must not silently drop
+        # the repo's hold paths (the same present-vs-absent rule as read_text).
+        if args.base or "not a git repository" not in str(exc):
             raise
         return None
 

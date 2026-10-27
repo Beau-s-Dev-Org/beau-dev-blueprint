@@ -193,6 +193,14 @@ class Verdict(Base):
         self.assertIn("(1 required)", out)
         self.assertNotIn("2 of 1", out)
 
+    def test_markdown_escapes_line_and_keeps_line_zero(self):
+        for line, expect in ((0, "(a.py:0)"), ("3|4\n5", "(a.py:3\\|4 5)")):
+            code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
+                                        "--changed-files", self.files("src/app.py"), "--markdown",
+                                        self.result("codex", [finding("P2", file="a.py", line=line)]))
+            self.assertEqual(code, 1)
+            self.assertIn(expect, out)
+
     def test_markdown_section_for_a_clean_branch(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
                                     "--changed-files", self.files("src/app.py"), "--markdown",
