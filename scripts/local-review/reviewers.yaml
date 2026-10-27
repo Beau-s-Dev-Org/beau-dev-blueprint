@@ -64,6 +64,11 @@ hold_paths:
   - '^contract/'
   - '^scripts/check_'
   - '^scripts/local-review/'
+  # Review and merge policy outside scripts: the skills that run the loop, the
+  # caller stubs and templates, and the agent rules that state the policy.
+  - '^\.skills/'
+  - '^templates/'
+  - '(^|/)(CLAUDE|AGENTS)(-template)?\.md$'
   - '(^|/)(CODEOWNERS|LICENSE[^/]*|REUSE\.toml)$'
   - '(?i)auth|rbac|identity|security|quarantine|secret|credential|licen[cs]e|migration'
 

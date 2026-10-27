@@ -154,7 +154,11 @@ def cmd_detect_author(cfg, args):
         if not args.base:
             raise UsageError("pass --base <ref> or --log-file <path>")
         text = git("log", "--format=%B", f"{args.base}..HEAD").decode(errors="replace")
-    fams = families_in_text(cfg, text)
+    # --also adds families the trailers may not show, above all the
+    # coordinator's own: it writes the fix commits, so from the first fix round
+    # onward it is an author of the diff and must not be routed as a reviewer.
+    also = parse_families(cfg, args.also) if args.also else []
+    fams = sorted(set(families_in_text(cfg, text)) | set(also))
     if not fams:
         # Unknown is not "any family": guessing here is exactly how a branch
         # ends up reviewed by the family that wrote it.
@@ -366,6 +370,7 @@ def main(argv=None):
     d = sub.add_parser("detect-author", help="author model family from commit trailers")
     d.add_argument("--base")
     d.add_argument("--log-file", help="commit messages to read instead of git log (tests)")
+    d.add_argument("--also", help="comma-separated families to add, e.g. the coordinator's own")
 
     def files_args(sp):
         sp.add_argument("--base", help="diff base ref, e.g. origin/main")

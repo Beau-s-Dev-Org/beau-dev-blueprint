@@ -100,6 +100,21 @@ class DetectAuthor(Base):
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(out)["families"], [])
 
+    def test_detect_author_rejects_a_fixer_as_reviewer_after_a_fix_round(self):
+        # Codex wrote the branch; a Claude coordinator then committed fixes
+        # without a trailer. Claude is now an author too and must not review.
+        log = self.log("feat: x\n\nCo-Authored-By: Codex <noreply@openai.com>\n\nfix: y\n")
+        code, out, _ = self.run_cli("detect-author", "--log-file", log, "--also", "anthropic")
+        self.assertEqual(code, 0)
+        authors = ",".join(json.loads(out)["families"])
+        self.assertEqual(authors, "anthropic,openai")
+        code, plan, _ = self.route(authors, "--no-advance")
+        self.assertEqual({c["family"] for c in plan["candidates"]}, {"google"})
+
+    def test_detect_author_rejects_unknown_also_family(self):
+        code, _, _ = self.run_cli("detect-author", "--log-file", self.log("x\n"), "--also", "meta")
+        self.assertEqual(code, 2)
+
     def test_detect_author_ignores_family_names_outside_trailers(self):
         code, _, _ = self.run_cli("detect-author", "--log-file", self.log(
             "chore: bump the claude and gemini clients\n"))
@@ -140,7 +155,9 @@ class Route(Base):
 
     def test_hold_path_needs_two_clean_families(self):
         for path in (".github/workflows/ci.yml", "src/auth/login.py", "LICENSE",
-                     "db/migrations/001.sql", "scripts/local-review/reviewers.yaml"):
+                     "db/migrations/001.sql", "scripts/local-review/reviewers.yaml",
+                     ".skills/local-review/SKILL.md", "templates/ocr-review-caller.yml",
+                     "CLAUDE.md", "CLAUDE-template.md", "pkg/AGENTS.md"):
             code, plan, _ = self.route("anthropic", "--no-advance", files=("README.md", path))
             self.assertEqual(code, 0, path)
             self.assertEqual(plan["tier"], "hold", path)
@@ -252,6 +269,13 @@ class Verdict(Base):
             self.assertEqual(code, 1, model)
         code, _, _ = self.verdict("anthropic", [self.result("antigravity", model="gemini-pro")])
         self.assertEqual(code, 0)
+
+    def test_verdict_rejects_one_family_for_a_skill_only_change(self):
+        # The review skill is review pipeline: one family cannot approve it.
+        code, v, _ = self.verdict("anthropic", [self.result("codex")],
+                                  files=(".skills/local-review/SKILL.md",))
+        self.assertEqual(code, 1)
+        self.assertEqual(v["tier"], "hold")
 
     def test_hold_tier_rejects_a_single_clean_family(self):
         hold = (".github/workflows/ci.yml",)

@@ -31,12 +31,21 @@ override its answer, re-grade a finding, or count a review it rejected.
 
 ## Prerequisites
 
-Both found by running this skill for real (2026-10-26):
+All found by running this skill for real (2026-10-26):
 
 - **The repo is registered in Orca** (`orca repo list --json`). If it isn't, Orca
   cannot start agents in it: `worker-start` and `agent launch` fail with
   `selector_not_found`. Registering it changes Beau's Orca setup, so ask him
   first, then run `orca repo add`.
+- **Each reviewer agent is signed in inside Orca** (Settings → Accounts). A
+  signed-out agent's worker fails at once with an escalation reading `isn't
+  signed in` (`failureKind: notSignedIn`). Treat it as unavailable for the
+  round. Signing in is Beau's step, not yours.
+- **A Claude coordinator launched through Orca can stop at Claude Code's
+  "Bypass Permissions mode" confirmation** and drop back to a shell. That
+  screen is Beau's security confirmation: do not answer it for him. Either he
+  accepts it once, or the coordinator runs from a terminal where Claude is
+  already running.
 - **The coordinator runs inside an Orca terminal.** Orchestration commands
   issued from anywhere else (the Claude desktop app, a plain shell) fail with
   `no_active_sender_terminal`. If you are not in one, do not coordinate from
@@ -74,15 +83,20 @@ orca skills get orchestration
 ## 1. Who wrote it
 
 ```bash
-$LR detect-author --base "$BASE"
+ME=anthropic   # YOUR model family: you write the fix commits, so you are an author too
+AUTHOR=$($LR detect-author --base "$BASE" --also "$ME" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["families"]))')
 ```
 
-Exit 2 means no `Co-Authored-By:` trailer names a model family. Do not guess.
-Pass your own family explicitly: you know which model you are.
+`--also "$ME"` matters from the first fix round onward. A Claude coordinator
+fixing a Codex-written branch makes Claude an author of the diff, so Claude must
+not review the next round. Give every fix commit your own `Co-Authored-By:`
+trailer as well, so the history says who wrote what.
 
 ## 2. Each round
 
-Commit everything first. A review is of a commit, not a working tree.
+Commit everything first. A review is of a commit, not a working tree. Recompute
+`AUTHOR` (step 1) at the start of every round, because the fixes since the last
+round may have added a family.
 
 ```bash
 HEAD_SHA=$(git rev-parse HEAD)
@@ -145,8 +159,15 @@ start a duplicate while a reviewer is still live or `unverifiable`.
 
 After the round, confirm the reviewers left the tree alone:
 `git status --porcelain` must match what it was before, and `git rev-parse HEAD`
-must still be `$HEAD_SHA`. If either changed, that round does not count:
-discard the changes, and start again from step 2 with a different reviewer.
+must still be `$HEAD_SHA`. If HEAD moved, or any file in the diff under review
+changed, that round does not count: discard the changes, and start again from
+step 2 with a different reviewer.
+
+Some tools set themselves up the first time an agent starts in a worktree, and
+leave files that no reviewer wrote. On the first real run, tokenade added
+`.hermes.md` and appended to `.gitignore`. Look at what such a file contains
+before you remove it. If it is plainly tool setup, unrelated to the diff,
+discard it (`git checkout -- <file>` or delete it) and keep the round.
 
 ## 3. Verdict
 
@@ -170,8 +191,15 @@ git push -u origin HEAD
 Paste `section.md` into the **Local review** section of the PR body, and add one
 line per earlier round on what it found and what you fixed. Then open the PR.
 
-Check the remote head matches before you report it as done:
-`git ls-remote origin HEAD` against `git rev-parse HEAD`. OCR then reviews it.
+Check that the pushed branch is the commit that was reviewed before you report
+it as done. Query the branch ref itself, not `origin HEAD`, which is the
+default branch's tip:
+
+```bash
+test "$(git ls-remote origin "refs/heads/$(git rev-parse --abbrev-ref HEAD)" | cut -f1)" = "$HEAD_SHA"
+```
+
+OCR then reviews it.
 If OCR finds a P1/P2, fix it, then run a local round on the new commit before
 you push again. OCR is not where the rounds happen.
 
