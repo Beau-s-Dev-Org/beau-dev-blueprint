@@ -338,6 +338,8 @@ advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must
 }
 advice "advice: deadline below 25 suggests raising it" 20 1200 false false \
   'Raise `review_task_timeout_min`' 'already at their ceiling'
+advice "advice: both with room offers both"           20 300 false false \
+  'and/or `llm_timeout_sec`' 'already at their ceiling'
 advice "advice: only the request has room"             25 1200 false false \
   'Raise `llm_timeout_sec`, up to 1500s' 'Raise `review_task_timeout_min`'
 advice "advice: both at the ceiling says split"        25 1500 false false \

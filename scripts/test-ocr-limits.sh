@@ -42,6 +42,13 @@ if len(ctx) != 1 or "core.setOutput('changed_files'" not in ctx[0].get("with", {
 # By id, so an attempt that LOST these inputs fails too, not only one with
 # wrong values.
 attempts = [s for s in steps if s.get("id") in ("ocr-primary", "ocr-fallback1", "ocr-fallback2")]
+# The attempts resolve steps.limits.outputs, which the with: checks below cannot
+# see: a renamed id or a step moved below them leaves all three inputs empty.
+if match[0].get("id") != "limits":
+    sys.exit(f"the limits step's id is {match[0].get('id')!r}, not 'limits'")
+ids = [s.get("id") for s in steps]
+if "ocr-primary" not in ids or ids.index("limits") > ids.index("ocr-primary"):
+    sys.exit("the limits step does not run before the first review attempt")
 if len(attempts) != 3:
     sys.exit(f"expected 3 review attempt steps, found {len(attempts)}")
 for s in attempts:
@@ -146,12 +153,13 @@ check 1 1200 ""  11 "rejects an empty deadline"                  "TASK_TIMEOUT_M
 check 1 "12a" 25 11 "rejects a non-numeric request timeout"      "LLM_TIMEOUT_SEC must be a positive integer"
 check 1 1200 "2.5" 11 "rejects a fractional deadline"            "TASK_TIMEOUT_MIN must be a positive integer"
 check 1 "-5" 25 11  "rejects a negative request timeout"         "LLM_TIMEOUT_SEC must be a positive integer"
-# The value is echoed back inside quotes, so "$(echo" appears; an executed
-# substitution would print the bare sentinel, which must never appear.
+# Anchored on the literal value: an executed substitution would drop the $( or
+# backticks, so this fails whatever the surrounding punctuation becomes. The
+# bare-sentinel check stays as a second line of defence.
 check 1 '$(echo INJECTED_SENTINEL_9f3)' 25 11 "treats a command substitution as data" \
-  "must be a positive integer" "" "INJECTED_SENTINEL_9f3'."
+  "must be a positive integer, got '\$(echo INJECTED_SENTINEL_9f3)'" "" "INJECTED_SENTINEL_9f3'."
 check 1 '`echo INJECTED_SENTINEL_9f3`' 25 11 "treats backticks as data" \
-  "must be a positive integer" "" "INJECTED_SENTINEL_9f3'."
+  "must be a positive integer, got '\`echo INJECTED_SENTINEL_9f3\`'" "" "INJECTED_SENTINEL_9f3'."
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

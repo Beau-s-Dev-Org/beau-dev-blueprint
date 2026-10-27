@@ -852,7 +852,12 @@ jobs:
                 echo "The per-file limit was shortened to fit this PR's size (configured:"
                 echo "${CONFIGURED_TASK_MIN:-?} min), so raising \`review_task_timeout_min\` will not help."
               fi
-              if [ -n "$TASK_ROOM" ]; then
+              # A `timeout` does not say which limit fired, so when both have
+              # headroom, both are offered.
+              if [ -n "$TASK_ROOM" ] && [ -n "$LLM_ROOM" ]; then
+                echo "Either limit can be the one that fired: raise \`review_task_timeout_min\` (at most 25)"
+                echo "and/or \`llm_timeout_sec\` (up to 60 × the deadline), or split the file."
+              elif [ -n "$TASK_ROOM" ]; then
                 echo "Raise \`review_task_timeout_min\` (at most 25); \`llm_timeout_sec\` can then go"
                 echo "up to 60 × the new deadline. Or split the file."
               elif [ -n "$LLM_ROOM" ]; then
