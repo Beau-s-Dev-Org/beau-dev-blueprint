@@ -228,12 +228,30 @@ class Verdict(Base):
         self.assertEqual(len(v["stale"]), 1)
 
     def test_verdict_rejects_a_malformed_commit_id_as_unreadable_not_stale(self):
-        for bad in (None, "", 123, SHA[:12], "z" * 40):
+        # Every shape a commit field can take that is not exactly a full SHA.
+        for bad in (None, "", 123, [SHA], {"sha": SHA}, SHA[:12], SHA + "a", "z" * 40,
+                    SHA + "\n", "\n" + SHA, " " + SHA, SHA + " ", SHA[:20] + " " + SHA[20:39],
+                    "\uff41" * 40):
             path = self.result("codex", [finding("P1")], commit=bad)
             code, v, _ = self.verdict("anthropic", [self.result("codex"), path])
             self.assertEqual(code, 1, bad)
             self.assertEqual(len(v["invalid"]), 1, bad)
             self.assertEqual(v["stale"], [], bad)
+
+    def test_an_uppercase_sha_is_the_same_commit(self):
+        self.assertEqual(self.verdict("anthropic", [self.result("codex", commit=SHA.upper())])[0], 0)
+
+    def test_verdict_rejects_a_malformed_reviewer_field(self):
+        for bad in (None, "", 7, ["codex"], {"id": "codex"}):
+            path = self.result("codex", [finding("P1")])
+            doc = json.load(open(path)); doc["reviewer"] = bad
+            json.dump(doc, open(path, "w"))
+            code, v, _ = self.verdict("anthropic", [self.result("codex"), path])
+            self.assertEqual(code, 1, bad)
+            self.assertEqual(len(v["invalid"]), 1, bad)
+
+    def test_verdict_rejects_a_head_commit_argument_with_a_trailing_newline(self):
+        self.assertEqual(self.verdict("anthropic", [self.result("codex")], commit=SHA + "\n")[0], 2)
 
     def test_stale_findings_do_not_block_the_current_commit(self):
         code, _, _ = self.verdict("anthropic", [self.result("codex", [finding("P1")], commit=OLD_SHA),

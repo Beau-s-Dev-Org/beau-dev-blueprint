@@ -34,7 +34,13 @@ CONFIG_SCHEMA = "local-review-config/v1"
 RESULT_SCHEMA = "local-review-result/v1"
 SEVERITIES = ("P1", "P2", "P3")
 BLOCKING = ("P1", "P2")
-SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# Always used with fullmatch: `$` also matches before a trailing newline, so
+# `.match` accepted "<sha>\n" (found in review, round 4).
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def is_sha(value):
+    return isinstance(value, str) and SHA_RE.fullmatch(value.lower()) is not None
 TRAILER_RE = re.compile(r"^\s*co-authored-by:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
@@ -299,7 +305,7 @@ def assess(cfg, authors, commit, paths):
         if not isinstance(doc, dict) or doc.get("schema") != RESULT_SCHEMA:
             out["invalid"].append({"file": path, "reason": f"not a {RESULT_SCHEMA} object"})
             continue
-        if not isinstance(doc.get("commit"), str) or not SHA_RE.match(doc["commit"].lower()):
+        if not is_sha(doc.get("commit")):
             # Missing, empty, abbreviated or non-string: that does not show the
             # review was of an OLDER commit, so it must not be waved through as
             # stale with its findings unread.
@@ -308,6 +314,9 @@ def assess(cfg, authors, commit, paths):
         if doc["commit"].lower() != commit:
             # A review of an earlier commit says nothing about this one.
             out["stale"].append({"file": path, "commit": doc.get("commit")})
+            continue
+        if not isinstance(doc.get("reviewer"), str) or not doc["reviewer"]:
+            out["invalid"].append({"file": path, "reason": f"reviewer {doc.get('reviewer')!r} is not a non-empty string"})
             continue
         problem = check_findings(doc.get("findings"))
         if problem:
@@ -378,7 +387,7 @@ def markdown(result, rounds):
 def cmd_verdict(cfg, args):
     authors = parse_families(cfg, args.author_family)
     commit = (args.commit or "").lower()
-    if not SHA_RE.match(commit):
+    if not is_sha(commit):
         raise UsageError("--commit must be the full 40-character head SHA")
     tier, _ = tier_for(cfg, changed_files(args), repo_root(args))
     required = 2 if tier == "hold" else 1
