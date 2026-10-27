@@ -37,6 +37,16 @@ class Unsatisfiable(Exception):
     """The enabled roster cannot meet the routing rules: exit 3."""
 
 
+def is_clean_pattern(value):
+    """A non-empty regex string with no leading or trailing whitespace.
+
+    Empty matches everything. Padding (" ^scripts/") passes a non-empty check
+    but never matches, silently disabling the entry. Refused, not trimmed, so
+    the config means exactly what it says.
+    """
+    return isinstance(value, str) and value != "" and value == value.strip()
+
+
 def read_text(path, missing_ok=False):
     """Every input file goes through here: unreadable is exit 2, never 1.
 
@@ -80,7 +90,7 @@ def load_config(path):
     # the code for "not clean", not the code for "bad config" (PR #73, twice).
     families = cfg.get("families")
     if not isinstance(families, dict) or not families \
-            or not all(isinstance(k, str) and k and isinstance(v, str) and v.strip()
+            or not all(isinstance(k, str) and k and is_clean_pattern(v)
                        for k, v in families.items()):
         # An empty pattern matches everything: every trailer and model would
         # count as that family. Same for an empty hold path, below.
@@ -132,7 +142,7 @@ def load_config(path):
     # `hold_paths:` line) into None; both silently switched the hold tier off
     # (PR #73). To mean "no hold paths", write `hold_paths: []`.
     hold = cfg["hold_paths"] if "hold_paths" in cfg else []
-    if not isinstance(hold, list) or not all(isinstance(p, str) and p.strip() for p in hold):
+    if not isinstance(hold, list) or not all(is_clean_pattern(p) for p in hold):
         raise UsageError("hold_paths must be a list of non-empty regex strings")
     try:
         cfg["_hold_re"] = [re.compile(p) for p in hold]

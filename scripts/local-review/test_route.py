@@ -267,7 +267,7 @@ reviewers:
     def test_config_rejects_hold_paths_that_are_not_a_list_of_strings(self):
         # Falsy shapes too: "", {} and false must not read as "no hold paths".
         for hold in ("'^scripts/'", "{'^a': 1}", "[1]", "''", "{}", "false", "null", "",
-                     "['']", "['  ']"):
+                     "['']", "['  ']", "[' ^scripts/']", "['^scripts/ ']"):
             path = self.config(self.BASE.replace("hold_paths: []", f"hold_paths: {hold}")
                                + "  - {id: c, family: openai, agent: codex, enabled: true}\n")
             code, _, err = self.run_cli("--config", path, "unavailable", "--reason", "x")
@@ -318,7 +318,7 @@ reviewers:
         self.assertIn("unknown key(s) multiprovider", err)
 
     def test_config_rejects_an_empty_family_pattern(self):
-        for pat in ("''", "'  '"):
+        for pat in ("''", "'  '", "' claude'", "'claude '"):
             text = self.BASE.replace("anthropic: 'claude'", f"anthropic: {pat}") \
                 + "  - {id: c, family: openai, agent: codex, enabled: true}\n"
             code, _, err = self.run_cli("--config", self.config(text), "unavailable", "--reason", "x")
