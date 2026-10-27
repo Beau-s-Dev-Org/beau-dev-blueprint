@@ -88,6 +88,21 @@ for s in attempts:
     # assumes.
     if s.get("timeout-minutes") != 85:
         sys.exit(f"attempt {s.get('name')!r} has timeout-minutes {s.get('timeout-minutes')!r}, not 85")
+# ...and 85 is derived from the body's cap, read back rather than assumed, so
+# widening the cap without the budget fails here.
+import re
+caps = re.findall(r"\(\( TASK > (\d+) \)\) && TASK=(\d+)", match[0]["run"])
+if len(caps) != 1 or caps[0][0] != caps[0][1]:
+    sys.exit(f"could not read the deadline cap from the limits step: {caps}")
+cap = int(caps[0][0])
+if 3 * cap + 10 != 85:
+    sys.exit(f"cap {cap}: grouping + 2 rounds + 10-minute reserve is {3 * cap + 10}, not the 85-minute attempt")
+# Removed outputs must not be produced or consumed anywhere in the workflow.
+import json
+dump = json.dumps(doc)
+for name in ("task_shortened", "task_ceiling", "llm_shortened", "changed_files"):
+    if name in dump:
+        sys.exit(f"the workflow still references the removed {name!r}")
     w = s.get("with") or {}
     if (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
             or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"
@@ -133,10 +148,11 @@ check 0 "$DEF_LLM" "$DEF_TASK" "the defaults emit no notice"   "" "" "::notice::
 # The deadline is the configured value capped at 25, whatever the PR's size:
 # OCR bundles files into groups, and the group count is not known in advance.
 check 0 1200 25 "the configured deadline is used as is"        "85 min per attempt" "25 1200"
-check 0 600  10 "a lower configured deadline is kept"          "" "10 600"
+check 0 600  10 "a request exactly at its deadline is not clamped or warned" "" "10 600" "::warning::"
 check 0 300  25 "a request below the deadline is kept"         "" "25 300"
-check 0 1501 25 "a request longer than its deadline is clamped, with a warning" "it is clamped to that deadline" "25 1500"
-check 0 1200 26 "a deadline over 25 is clamped, with a warning" "using at most 25" "25 1200"
+check 0 1501 25 "a request longer than its deadline is clamped, with a warning" "::warning::llm_timeout_sec is 1501s" "25 1500"
+check 0 1500 25 "a request exactly at the default cap is not warned" "" "25 1500" "::warning::"
+check 0 1200 26 "a deadline over 25 is clamped, with a warning" "::warning::review_task_timeout_min is 26" "25 1200"
 check 0 1560 26 "a request is clamped against the CAPPED deadline, with a warning" "it is clamped to that deadline" "25 1500"
 check 0 3000 30 "an older stub with higher settings still gets a review" "::warning::" "25 1500"
 check 0 1200 10 "a request over a lower deadline is clamped to it" "" "10 600"
@@ -166,7 +182,8 @@ LLM_TIMEOUT_SEC=3000 TASK_TIMEOUT_MIN=30 GITHUB_OUTPUT="$WORK/gh_out" \
 if [ "$?" -eq 0 ] && [ "$(cut -d= -f1 "$WORK/gh_out" | sort | tr '\n' ' ')" = "effort llm_timeout_sec task_minutes " ]; then
   pass=$((pass+1)); echo "  ok    a clamping run writes exactly the three outputs"
 else
-  fail=$((fail+1)); echo "  FAIL  a clamping run's outputs changed"; sed 's/^/        /' "$WORK/gh_out"
+  fail=$((fail+1)); echo "  FAIL  a clamping run's outputs changed"
+  sed 's/^/        /' "$WORK/gh_out"; sed 's/^/        /' "$WORK/out"
 fi
 
 # A failure also writes its reason as an output, newline-free.

@@ -49,14 +49,15 @@ if set(env) != set(want) | other:
 # an all-files failure is reported as "failed", fails the attempt step, and
 # skipping the gate then left an older run's notice on the PR (#73).
 cond = " ".join(str(match[0].get("if", "")).replace("${{", "").replace("}}", "").split())
-if cond != "steps.limits.outcome == 'success' && steps.ocr-primary.outcome != 'skipped'":
+if cond != "!cancelled() && steps.limits.outcome == 'success' && steps.ocr-primary.outcome != 'skipped'":
     sys.exit(f"the gate's condition is {cond!r}; it must run whenever the primary attempt ran")
-# The condition has no status function, so Actions adds success(): the gate
-# runs after a failed attempt only because continue-on-error swallows it.
+# continue-on-error keeps a failed primary from failing the job outright, so
+# the fallbacks can run; !cancelled() above is what lets the gate run after
+# any failed step.
 for s in steps:
     if s.get("id") in ("ocr-primary", "ocr-fallback1", "ocr-fallback2") \
             and s.get("continue-on-error") not in (True, "true"):
-        sys.exit(f"attempt {s.get('id')} is not continue-on-error, so a failure would skip the gate")
+        sys.exit(f"attempt {s.get('id')} is not continue-on-error, so a failure would skip the fallbacks")
 PY
 # Wiring checks exit after step.sh is written; no -e here, so check status.
 [ "$?" -eq 0 ] || { echo "FAIL: extraction or env-wiring checks failed"; exit 1; }
@@ -332,18 +333,38 @@ else
   echo "  FAIL  a failed abstention did not reach the PR as failed"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
 fi
 
-# No attempt succeeded and no result: the job is red, so the PR must not be
-# told the check is "green but unverified".
-: > "$WORK/gh.log"; : > "$WORK/comment.md"; rm -f "$WORK/result.json"
+# A failed attempt (ATTEMPT_SUCCEEDED=false) must never leave a green verdict
+# on the PR: the next step turns the job red. One case per path that would
+# otherwise exit green, each required to exit 0 (the fail-gate, not this
+# step, reddens the job) and to post the failed-attempt notice.
+attempt_failed_case() {  # name, result-json-or-NONE
+  : > "$WORK/gh.log"; : > "$WORK/comment.md"
+  if [ "$2" = "NONE" ]; then rm -f "$WORK/result.json"; else printf '%s' "$2" > "$WORK/result.json"; fi
+  PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
+    OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
+    GITHUB_STEP_SUMMARY="$WORK/summary.md" ATTEMPT_SUCCEEDED=false \
+    bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/af.out" 2>&1; local rc=$?
+  if [ "$rc" -eq 0 ] && grep -q "pr comment" "$WORK/gh.log" && grep -q "did not complete" "$WORK/comment.md" \
+     && ! grep -qE "green but unverified|✅" "$WORK/comment.md"; then
+    echo "  ok    $1"; PASS=$((PASS+1))
+  else
+    echo "  FAIL  $1 (exit $rc)"; sed 's/^/        /' "$WORK/af.out"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
+  fi
+}
+attempt_failed_case "failed attempt, no result: not green"            NONE
+attempt_failed_case "failed attempt, invalid result: not green"       "not json"
+attempt_failed_case "failed attempt, complete result: not green"      "$COMPLETE"
+attempt_failed_case "failed attempt, nothing selected: not green"     "$SKIPPED_EMPTY"
+# ...while an incomplete result still fails this step itself, as before.
+: > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
 PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
   OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
   GITHUB_STEP_SUMMARY="$WORK/summary.md" ATTEMPT_SUCCEEDED=false \
-  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
-if grep -q "pr comment" "$WORK/gh.log" && grep -q "did not run" "$WORK/comment.md" \
-   && ! grep -q "green but unverified" "$WORK/comment.md"; then
-  echo "  ok    a run with no successful attempt says so, not green"; PASS=$((PASS+1))
+  bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 1 ] && grep -q "did not finish" "$WORK/comment.md"; then
+  echo "  ok    failed attempt, partial result: still names the files"; PASS=$((PASS+1))
 else
-  echo "  FAIL  a run with no successful attempt was reported as green"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
+  echo "  FAIL  failed attempt, partial result (exit $rc)"; FAIL=$((FAIL+1))
 fi
 
 # An abstention is green, and must still reach the PR — otherwise "green but
