@@ -59,6 +59,33 @@ work within a single owner. Per the design doc (§14), it becomes private with
 organization-wide workflow access once the consuming repos live under
 `Beau-s-Dev-Org`.
 
+## Local review before the PR (BEA-591)
+
+Most review rounds run on Beau's Mac before a PR exists, orchestrated by
+Orca, on paid agent subscriptions. OCR above is the final
+gate. Flow and rules: [`.skills/local-review/SKILL.md`](.skills/local-review/SKILL.md).
+
+- **Cross-family.** A branch is reviewed only by a model family other than the
+  one that wrote it. Families and reviewers live in
+  [`scripts/local-review/reviewers.yaml`](scripts/local-review/reviewers.yaml),
+  the only place model names appear.
+- **Deterministic gate.** `scripts/local-review/local_review.py` decides who may
+  review (`route`) and whether the head commit is clean (`verdict`), and fails
+  closed on anything it cannot read. Tests:
+  `python3 -m unittest discover -s scripts/local-review -v`.
+- **Clean** means no P1/P2 on the head commit from one non-author family, or two
+  on hold-for-Beau paths.
+- **No local OpenRouter fallback.** If no subscription reviewer can run, the PR
+  opens anyway and OCR runs the rounds.
+
+Install the skill for each agent that will open PRs:
+
+```bash
+ln -s "$HOME/dev/beau-dev-blueprint/.skills/local-review" "$HOME/.claude/skills/local-review"
+```
+
+PR body template: [`templates/PULL_REQUEST_TEMPLATE.md`](templates/PULL_REQUEST_TEMPLATE.md).
+
 ## Consuming repos
 
 `beauzone/marketing-as-code`, `mac-engine`, `mac-cli`, `mac-client`,

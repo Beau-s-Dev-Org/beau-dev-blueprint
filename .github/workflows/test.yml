@@ -76,6 +76,11 @@ jobs:
       - name: OCR completeness gate
         run: bash scripts/test-ocr-completeness.sh
 
+      # Cross-family routing and the "clean" verdict for local review (BEA-591).
+      # Uses only PyYAML, already installed above.
+      - name: Local review routing
+        run: python3 -m unittest discover -s scripts/local-review -v
+
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.
       - name: OCR completeness state audit
