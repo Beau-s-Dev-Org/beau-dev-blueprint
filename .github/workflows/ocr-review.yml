@@ -96,12 +96,12 @@ on:
           decides `timeout` in the completeness report. OCR's default is 15.
 
           25 (2026-10-27): files in beau-dev-blueprint #73 hit the old fixed
-          10. OCR reviews up to 8 files at once, so a PR of up to 16 files
-          runs in two waves; 2 × 25 plus install and posting fits the
-          60-minute attempt step. Allowed range 1-25. For a PR of more than
-          16 files, "Check review time limits" passes a shorter deadline
-          (50 / waves) so the attempt still ends in a readable partial review
-          instead of a killed step.
+          10. The deadline applies per review round, and effort is pinned to
+          medium (2 rounds), so 25 × 2 plus install and posting fits the
+          60-minute attempt for one wave of up to 8 files. Allowed range 1-25.
+          For larger PRs "Check review time limits" passes a shorter deadline,
+          50 / (waves × rounds), so the attempt still ends in a readable
+          partial review instead of a killed step.
         required: false
         type: string
         default: '25'
@@ -268,15 +268,20 @@ jobs:
         # nothing.
         #
         # OCR reviews 8 files at once, so a PR of N changed files runs in
-        # ceil(N/8) waves, each lasting up to the per-file task deadline. The
-        # attempt step is a fixed 60 minutes, 10 of them reserved for install,
-        # checkout and comment posting, so the deadline actually passed is
-        # min(review_task_timeout_min, floor(50 / waves)): up to 16 files get
-        # the full 25 minutes; a larger PR gets a shorter per-file deadline and
-        # a legible partial review rather than a killed attempt. The request
-        # timeout is clamped to fit inside that deadline. The changed-file
-        # count includes files OCR will skip (deletions, Markdown), so it is an
-        # upper bound and errs toward shorter deadlines, never longer.
+        # ceil(N/8) waves. Each file may take up to the task deadline times its
+        # review rounds (v1.13.3 internal/agent/agent.go:677), and the rounds
+        # come from the effort level, pinned here to medium = 2 rounds
+        # (internal/config/template/effort.go). The attempt step is a fixed 60
+        # minutes, 10 of them reserved for install, checkout and comment
+        # posting, so the deadline passed is
+        #   min(review_task_timeout_min, floor(50 / (waves * rounds))):
+        # up to 8 files get the full 25 minutes per round, 9-16 get 12, and so
+        # on; a large PR gets a shorter deadline and a legible partial review
+        # rather than a killed attempt. The request timeout is clamped to fit
+        # inside the deadline. The changed-file count includes files OCR will
+        # skip (deletions, Markdown), so it is an upper bound and errs toward
+        # shorter deadlines, never longer. A count that cannot be read is an
+        # error, not a guess: both supported events always provide it.
         shell: bash
         env:
           # BEA-327: never interpolate a context value into a run body.
@@ -292,36 +297,37 @@ jobs:
             }
           done
           if (( TASK_TIMEOUT_MIN > 25 )); then
-            echo "::error::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; the maximum is 25 (two waves of 8 files must fit the 60-minute attempt step)."
+            echo "::error::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; the maximum is 25 (one wave of 8 files at 2 review rounds must fit the 60-minute attempt step)."
             exit 1
           fi
           if (( LLM_TIMEOUT_SEC > TASK_TIMEOUT_MIN * 60 )); then
             echo "::error::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute per-file task deadline that contains it."
             exit 1
           fi
-          if [[ "${CHANGED_FILES:-}" =~ ^[0-9]{1,6}$ ]]; then
-            N=$(( 10#$CHANGED_FILES ))
-          else
-            # Unknown size: plan for two waves (the configured maximum), and say so.
-            echo "::warning::Could not read the PR's changed-file count ('${CHANGED_FILES:-}'); assuming up to 16 files."
-            N=16
-          fi
+          [[ "${CHANGED_FILES:-}" =~ ^[0-9]{1,6}$ ]] || {
+            echo "::error::Could not read the PR's changed-file count ('${CHANGED_FILES:-}'), so no per-file deadline can be guaranteed to fit the attempt."
+            exit 1
+          }
+          N=$(( 10#$CHANGED_FILES ))
           (( N >= 1 )) || N=1
+          EFFORT=medium
+          case "$EFFORT" in low) ROUNDS=1 ;; medium) ROUNDS=2 ;; high) ROUNDS=3 ;; esac
           WAVES=$(( (N + 7) / 8 ))
-          TASK=$(( 50 / WAVES ))
+          TASK=$(( 50 / (WAVES * ROUNDS) ))
           (( TASK > TASK_TIMEOUT_MIN )) && TASK=$TASK_TIMEOUT_MIN
           if (( TASK < 1 )); then
-            echo "::error::This PR changes ${N} files (${WAVES} waves of 8); even a 1-minute per-file deadline cannot fit the 60-minute attempt. Split the PR."
+            echo "::error::This PR changes ${N} files (${WAVES} waves of 8, ${ROUNDS} rounds each); even a 1-minute per-file deadline cannot fit the 60-minute attempt. Split the PR."
             exit 1
           fi
           LLM=$LLM_TIMEOUT_SEC
           (( LLM > TASK * 60 )) && LLM=$(( TASK * 60 ))
           if (( TASK < TASK_TIMEOUT_MIN )); then
-            echo "::notice::${N} changed files run in ${WAVES} waves, so the per-file deadline is ${TASK} min (configured ${TASK_TIMEOUT_MIN}) to fit the 60-minute attempt."
+            echo "::notice::${N} changed files run in ${WAVES} waves of ${ROUNDS} rounds, so the per-file deadline is ${TASK} min per round (configured ${TASK_TIMEOUT_MIN}) to fit the 60-minute attempt."
           fi
           echo "task_minutes=${TASK}" >> "$GITHUB_OUTPUT"
           echo "llm_timeout_sec=${LLM}" >> "$GITHUB_OUTPUT"
-          echo "Review time limits: ${N} changed files, ${WAVES} wave(s); ${LLM}s per request, ${TASK} min per file, 60 min per attempt."
+          echo "effort=${EFFORT}" >> "$GITHUB_OUTPUT"
+          echo "Review time limits: ${N} changed files, ${WAVES} wave(s) x ${ROUNDS} rounds; ${LLM}s per request, ${TASK} min per file per round, 60 min per attempt."
 
       - name: Run OpenCodeReview (primary)
         id: ocr-primary
@@ -347,6 +353,8 @@ jobs:
           llm_use_anthropic: 'false'
           ocr_version: '1.13.3'
           review_task_timeout: ${{ steps.limits.outputs.task_minutes }}
+          # Pinned so the round count the limits step assumes is the one used.
+          effort: ${{ steps.limits.outputs.effort }}
           # The primary gives up its artifact too. Inside the action the step
           # order is: run review -> UPLOAD ARTIFACT -> fail-on-error -> POST
           # COMMENTS. The upload therefore sits between a completed review and
@@ -411,6 +419,8 @@ jobs:
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback1 || 'false' }}
           ocr_version: '1.13.3'
           review_task_timeout: ${{ steps.limits.outputs.task_minutes }}
+          # Pinned so the round count the limits step assumes is the one used.
+          effort: ${{ steps.limits.outputs.effort }}
           # See the fallback-semantics note in the header: the primary
           # attempt already uploaded ocr-review-result-<run_id>-<attempt>,
           # and a second upload under the same name 409s and fails the
@@ -459,6 +469,8 @@ jobs:
           llm_use_anthropic: ${{ inputs.llm_use_anthropic_fallback2 || 'false' }}
           ocr_version: '1.13.3'
           review_task_timeout: ${{ steps.limits.outputs.task_minutes }}
+          # Pinned so the round count the limits step assumes is the one used.
+          effort: ${{ steps.limits.outputs.effort }}
           # Same artifact-name conflict as fallback 1.
           upload_artifacts: 'false'
           base_ref: ${{ steps.pr-context.outputs.base_ref }}
@@ -775,9 +787,9 @@ jobs:
               echo
               echo "A review that did not run is not an approval. \`timeout\` means the file"
               echo "hit a time limit and will keep doing so — re-running alone will not help."
-              echo "Two limits apply: the per-file task deadline (${TASK_TIMEOUT_MIN:-?} min this run;"
-              echo "\`review_task_timeout_min\`, at most 25, shortened automatically for PRs over"
-              echo "16 files) and the per-request limit inside it (${LLM_TIMEOUT_SEC:-?}s this run;"
+              echo "Two limits apply: the per-file task deadline (${TASK_TIMEOUT_MIN:-?} min per round"
+              echo "this run; \`review_task_timeout_min\`, at most 25, shortened automatically for PRs"
+              echo "over 8 files) and the per-request limit inside it (${LLM_TIMEOUT_SEC:-?}s this run;"
               echo "\`llm_timeout_sec\`). Either can be the one that fired: raise"
               echo "\`review_task_timeout_min\` and/or \`llm_timeout_sec\` in the caller stub,"
               echo "or split the file or the PR."

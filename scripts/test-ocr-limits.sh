@@ -50,21 +50,25 @@ check() {
 }
 
 read -r DEF_LLM DEF_TASK < "$WORK/defaults"
-check 0 "$DEF_LLM" "$DEF_TASK" 11 "shipped defaults pass ($DEF_LLM s, $DEF_TASK min)" "" "$DEF_TASK $DEF_LLM"
+check 0 "$DEF_LLM" "$DEF_TASK" 8 "shipped defaults pass (8 files) ($DEF_LLM s, $DEF_TASK min)" "" "$DEF_TASK $DEF_LLM"
 
-# Per-file deadline follows the number of 8-file waves (50 / waves, capped).
-check 0 1200 25 1   "1 file: one wave, full deadline"            "1 wave(s)" "25 1200"
-check 0 1200 25 16  "16 files: two waves, full deadline"         "2 wave(s)" "25 1200"
-check 0 1200 25 17  "17 files: three waves, deadline cut to 16"  "deadline is 16 min" "16 960"
-check 0 1200 25 40  "40 files: five waves, deadline 10"          "5 waves" "10 600"
-check 0 1200 25 400 "400 files: fifty waves, deadline 1"         "50 waves" "1 60"
-check 0 600  10 11  "a lower configured deadline is kept"        "" "10 600"
-check 0 300  25 11  "a request below the deadline is kept"       "" "25 300"
-check 0 1200 25 0   "0 files counts as one wave"                 "1 wave(s)" "25 1200"
-check 0 1200 25 ""  "unknown count assumes 16 files, with a warning" "::warning::" "25 1200"
-check 0 1200 25 "x" "non-numeric count assumes 16 files"         "::warning::" "25 1200"
+# Per-file deadline = min(configured, floor(50 / (waves of 8 * 2 rounds))).
+check 0 1200 25 1   "1 file: one wave, full deadline"              "1 wave(s) x 2 rounds" "25 1200"
+check 0 1200 25 8   "8 files: one wave, full deadline"             "1 wave(s)" "25 1200"
+check 0 1200 25 9   "9 files: two waves, deadline 12"              "deadline is 12 min" "12 720"
+check 0 1200 25 16  "16 files: two waves, deadline 12"             "2 waves" "12 720"
+check 0 1200 25 17  "17 files: three waves, deadline 8"            "3 waves" "8 480"
+check 0 1200 25 40  "40 files: five waves, deadline 5"             "5 waves" "5 300"
+check 0 1200 25 200 "200 files: 25 waves, deadline 1"              "25 waves" "1 60"
+check 0 600  10 11  "a lower configured deadline is kept"          "" "10 600"
+check 0 300  25 11  "a request below the deadline is kept"         "" "12 300"
+check 0 1200 25 0   "0 files counts as one wave"                   "1 wave(s)" "25 1200"
+check 0 1200 25 1   "effort is pinned to medium"                   "" ""
+grep -qx "effort=medium" "$WORK/gh_out" || { fail=$((fail+1)); echo "  FAIL  effort output is not 'medium'"; }
 
-check 1 1200 25 401 "rejects a PR too large for even 1 min/file" "Split the PR"
+check 1 1200 25 201 "rejects a PR too large for even 1 min/file"   "Split the PR"
+check 1 1200 25 ""  "rejects an unknown file count"                "Could not read the PR's changed-file count"
+check 1 1200 25 "x" "rejects a non-numeric file count"             "Could not read the PR's changed-file count"
 check 1 1501 25 11  "rejects a request longer than its deadline" "longer than the 25-minute"
 check 1 1200 26 11  "rejects a deadline over 25 minutes"         "the maximum is 25"
 check 1 1200 0  11  "rejects a zero deadline"                    "TASK_TIMEOUT_MIN must be a positive integer"
