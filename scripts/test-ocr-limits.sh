@@ -25,12 +25,33 @@ match = [s for s in steps if s.get("name") == "Check review time limits"]
 if len(match) != 1:
     sys.exit(f"expected exactly one 'Check review time limits' step, found {len(match)}")
 open(sys.argv[2], "w").write(match[0]["run"])
+# The run body is tested below with injected values; this checks the wiring
+# that feeds those values in production, which the body test cannot see.
+want = {
+    "LLM_TIMEOUT_SEC": "${{ inputs.llm_timeout_sec }}",
+    "TASK_TIMEOUT_MIN": "${{ inputs.review_task_timeout_min }}",
+    "CHANGED_FILES": "${{ github.event_name == 'issue_comment' && steps.pr-context.outputs.changed_files || github.event.pull_request.changed_files }}",
+}
+env = match[0].get("env") or {}
+for k, v in want.items():
+    if env.get(k) != v:
+        sys.exit(f"env {k} is {env.get(k)!r}, expected {v!r}")
+ctx = [s for s in steps if s.get("id") == "pr-context"]
+if len(ctx) != 1 or "core.setOutput('changed_files'" not in ctx[0].get("with", {}).get("script", ""):
+    sys.exit("the pr-context step no longer outputs changed_files")
+for s in steps:
+    w = s.get("with") or {}
+    if "review_task_timeout" in w and (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
+            or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"
+            or w.get("effort") != "${{ steps.limits.outputs.effort }}"):
+        sys.exit(f"attempt {s.get('name')!r} is not fed by the limits step's outputs")
 PY
 [ -s "$WORK/step.sh" ] || { echo "FAIL: could not extract the step"; exit 1; }
 
 pass=0; fail=0
 # $1 expected exit, $2 llm seconds, $3 task minutes, $4 changed files,
-# $5 label, $6 text the output must contain, $7 expected "task llm" outputs.
+# $5 label, $6 text the output must contain, $7 expected "task llm" outputs,
+# $8 text the output must NOT contain.
 # A rejection must show ITS message: an unrelated exit 1 (an unset variable,
 # a typo in a test) would otherwise satisfy every rejection case.
 check() {
@@ -40,6 +61,7 @@ check() {
   local got=$? why=""
   [ "$got" -eq "$1" ] || why="expected exit $1, got $got"
   [ -z "$why" ] && [ -n "${6:-}" ] && ! grep -qF -- "$6" "$WORK/out" && why="output lacks: $6"
+  [ -z "$why" ] && [ -n "${8:-}" ] && grep -qF -- "$8" "$WORK/out" && why="output contains: $8"
   if [ -z "$why" ] && [ -n "${7:-}" ]; then
     local t l
     t=$(sed -n 's/^task_minutes=//p' "$WORK/gh_out"); l=$(sed -n 's/^llm_timeout_sec=//p' "$WORK/gh_out")
@@ -61,6 +83,7 @@ check 0 1200 25 8   "8 files: deadline 16"                          "1 wave(s)" 
 check 0 1200 25 9   "9 files: two waves, deadline 10"               "2 waves" "10 600"
 check 0 1200 25 16  "16 files: deadline 10"                         "2 waves" "10 600"
 check 0 1200 25 17  "17 files: three waves, deadline 7"             "3 waves" "7 420"
+check 0 1200 25 65  "65 files: requests under 300s get a warning"  "below OCR's own 300s" "2 120"
 check 0 1200 25 40  "40 files: five waves, deadline 4"              "5 waves" "4 240"
 check 0 1200 25 192 "192 files: 24 waves, deadline 1"               "24 waves" "1 60"
 check 0 600  10 2   "a lower configured deadline is kept"           "" "10 600"
@@ -103,7 +126,12 @@ check 1 1200 ""  11 "rejects an empty deadline"                  "TASK_TIMEOUT_M
 check 1 "12a" 25 11 "rejects a non-numeric request timeout"      "LLM_TIMEOUT_SEC must be a positive integer"
 check 1 1200 "2.5" 11 "rejects a fractional deadline"            "TASK_TIMEOUT_MIN must be a positive integer"
 check 1 "-5" 25 11  "rejects a negative request timeout"         "LLM_TIMEOUT_SEC must be a positive integer"
-check 1 '$(echo pwned)' 25 11 "treats a command substitution as data" "must be a positive integer"
+# The value is echoed back inside quotes, so "$(echo" appears; an executed
+# substitution would print the bare sentinel, which must never appear.
+check 1 '$(echo INJECTED_SENTINEL_9f3)' 25 11 "treats a command substitution as data" \
+  "must be a positive integer" "" "INJECTED_SENTINEL_9f3'."
+check 1 '`echo INJECTED_SENTINEL_9f3`' 25 11 "treats backticks as data" \
+  "must be a positive integer" "" "INJECTED_SENTINEL_9f3'."
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

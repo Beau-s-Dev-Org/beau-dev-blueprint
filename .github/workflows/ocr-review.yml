@@ -162,8 +162,9 @@ jobs:
     # endpoint cannot consume the whole job budget; 210 covers three sequential
     # attempts (3 × 60) plus 30 minutes for PR context, the limits check, the
     # install cleanups, the completeness gate's API calls and the Copilot step,
-    # guaranteeing the final fail-gate step still runs instead of being
-    # cancelled by the job timeout.
+    # each of which has its own timeout-minutes summing to 20, so the reserve
+    # is enforced rather than assumed and the final fail-gate step still runs
+    # instead of being cancelled by the job timeout.
     #
     # Nesting, enforced by "Check review time limits": the request timeout fits
     # in the per-file deadline, and every wave of per-file deadlines (derived
@@ -248,6 +249,7 @@ jobs:
     steps:
       - name: Get PR context
         id: pr-context
+        timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
         if: github.event_name == 'issue_comment'
         uses: actions/github-script@v9
         with:
@@ -267,6 +269,7 @@ jobs:
 
       - name: Check review time limits
         id: limits
+        timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
         # Validates the caller stub's limits, then derives the ones each attempt
         # actually uses, so that every attempt ends with a result the
         # completeness gate can read instead of a killed step that reports
@@ -341,6 +344,13 @@ jobs:
           fi
           LLM=$LLM_TIMEOUT_SEC
           (( LLM > TASK * 60 )) && LLM=$(( TASK * 60 ))
+          # Not floored at a minimum: OCR's grouping request runs before any
+          # per-file clock and is bounded only by this value, so a request
+          # longer than the deadline could overrun the attempt. Say plainly
+          # that short requests make timeouts likely, instead.
+          if (( LLM < 300 && LLM < LLM_TIMEOUT_SEC )); then
+            echo "::warning::This PR's size cuts each LLM request to ${LLM}s (below OCR's own 300s default). Expect files to report timeout; splitting the PR is what gives them time."
+          fi
           if (( TASK < TASK_TIMEOUT_MIN )); then
             echo "::notice::${N} changed files run in ${WAVES} waves of ${ROUNDS} rounds, so the per-file deadline is ${TASK} min per round (configured ${TASK_TIMEOUT_MIN}) to fit the 60-minute attempt."
           fi
@@ -401,6 +411,7 @@ jobs:
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
       - name: Clear the previous attempt's OCR install (before fallback 1)
+        timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
         # The action runs `npm install -g` on every attempt. A second global
         # install of the same package on the same runner intermittently dies
         # with ENOTEMPTY when npm renames the existing directory aside, so the
@@ -454,6 +465,7 @@ jobs:
           head_sha: ${{ steps.pr-context.outputs.head_sha }}
 
       - name: Clear the previous attempt's OCR install (before fallback 2)
+        timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
         # The action runs `npm install -g` on every attempt. A second global
         # install of the same package on the same runner intermittently dies
         # with ENOTEMPTY when npm renames the existing directory aside, so the
@@ -502,6 +514,7 @@ jobs:
 
       - name: Fail if the review only partially ran
         id: completeness
+        timeout-minutes: 5   # bounded, so the job's 30-minute reserve holds
         # OCR exits 0 when it reviewed SOME of the files it selected. Its own
         # result then reads:
         #
@@ -847,6 +860,7 @@ jobs:
           exit 1
 
       - name: Fail if all review attempts failed
+        timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
         # The attempt steps are continue-on-error, so this step is the only
         # thing that turns the job red. A skipped fallback (not configured)
         # has outcome 'skipped', which correctly does not count as success.
@@ -871,6 +885,7 @@ jobs:
           exit 1
 
       - name: Request a Copilot review as a backup (advisory only)
+        timeout-minutes: 5   # bounded, so the job's 30-minute reserve holds
         # Runs when no attempt produced a COMPLETE review: every attempt
         # failed, or the one that succeeded covered only some files. Ported
         # from the per-repo workaround in beauzone/mac-mcp-server
