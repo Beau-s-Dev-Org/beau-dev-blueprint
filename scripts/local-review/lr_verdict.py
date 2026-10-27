@@ -102,7 +102,8 @@ def markdown(result, rounds):
               "|---" * (3 + len(SEVERITIES)) + "|"]
     for r in result["reviews"]:
         lines.append(f"| {cell(r['reviewer'])} | {cell(r['family'] or '?')} | "
-                     f"{'yes' if r['eligible'] else 'no'} | "
+                     # Same rule as clean_families: eligible AND no P1/P2.
+                     f"{'yes' if r['eligible'] and not any(r[s] for s in BLOCKING) else 'no'} | "
                      + " | ".join(str(r[s]) for s in SEVERITIES) + " |")
     for b in result["blocking"]:
         where = ""

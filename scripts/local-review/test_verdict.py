@@ -149,6 +149,8 @@ class Verdict(Base):
         self.assertIn("**Result: not clean**", out)
         self.assertIn("Rounds: 3", out)
         self.assertIn("a \\| b c", out)
+        # An eligible review that found a P2 does not count toward clean.
+        self.assertIn("| codex | openai | no | 0 | 1 | 0 |", out)
 
     def test_markdown_explains_a_not_clean_result_with_no_findings(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,

@@ -1,7 +1,6 @@
 """Changed-file inventory, repo hold list, and review tier for local_review.py."""
 
 import os
-import re
 import subprocess
 
 from lr_config import UsageError, compile_pattern, read_text
