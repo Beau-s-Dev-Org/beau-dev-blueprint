@@ -323,17 +323,18 @@ fi
 # One case per state the limits step can hand over (Codex, PR #74): headroom
 # on the deadline, headroom on the request only, both at the ceiling on a
 # small PR, and shortened to fit a large one.
-advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must_not
+advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must_not[, configured_min]
+  # configured defaults to the deadline: an unshortened deadline IS the configured one.
   : > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
   PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
     OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
-    GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN=25 \
+    GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN="${8:-$2}" \
     TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" TASK_SHORTENED="$4" LLM_SHORTENED="$5" \
     bash --noprofile --norc -eo pipefail "$WORK/step.sh" >/dev/null 2>&1
   if grep -qF "$6" "$WORK/comment.md" && ! grep -qF "$7" "$WORK/comment.md"; then
     echo "  ok    $1"; PASS=$((PASS+1))
   else
-    echo "  FAIL  $1"; FAIL=$((FAIL+1))
+    echo "  FAIL  $1 (wanted '$6', must not '$7')"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
   fi
 }
 advice "advice: deadline below 25 suggests raising it" 20 1200 false false \
@@ -345,11 +346,11 @@ advice "advice: only the request has room"             25 1200 false false \
 advice "advice: both at the ceiling says split"        25 1500 false false \
   'already at their ceiling' 'Raise `'
 advice "advice: shortened deadline, request has room"  10 300 true false \
-  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`'
+  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 25
 advice "advice: shortened and full says split"         10 600 true true \
-  'already at their ceiling' 'Raise `'
+  'already at their ceiling' 'Raise `' 25
 advice "  ...and says the deadline was shortened"      10 600 true true \
-  'shortened to fit this PR' 'Raise `'
+  '25 min), so raising' 'Raise `' 25
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

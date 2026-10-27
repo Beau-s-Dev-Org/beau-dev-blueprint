@@ -46,9 +46,16 @@ attempts = [s for s in steps if s.get("id") in ("ocr-primary", "ocr-fallback1", 
 # see: a renamed id or a step moved below them leaves all three inputs empty.
 if match[0].get("id") != "limits":
     sys.exit(f"the limits step's id is {match[0].get('id')!r}, not 'limits'")
-ids = [s.get("id") for s in steps]
-if "ocr-primary" not in ids or ids.index("limits") > ids.index("ocr-primary"):
-    sys.exit("the limits step does not run before the first review attempt")
+# Per job: outputs do not cross jobs, so all four must share one job, with
+# limits ahead of every attempt, not just the first.
+attempt_ids = ("ocr-primary", "ocr-fallback1", "ocr-fallback2")
+homes = [[s.get("id") for s in j.get("steps", [])] for j in doc["jobs"].values()
+         if any(s.get("id") == "limits" for s in j.get("steps", []))]
+if len(homes) != 1 or not all(a in homes[0] for a in attempt_ids):
+    sys.exit("the limits step and all three review attempts are not in one job")
+for a in attempt_ids:
+    if homes[0].index("limits") > homes[0].index(a):
+        sys.exit(f"the limits step does not run before {a}")
 if len(attempts) != 3:
     sys.exit(f"expected 3 review attempt steps, found {len(attempts)}")
 for s in attempts:
@@ -105,13 +112,21 @@ check 0 1200 25 192 "192 files: 24 waves, deadline 1"               "24 waves" "
 check 0 600  10 2   "a lower configured deadline is kept"           "" "10 600"
 check 0 300  25 11  "a request below the deadline is kept"          "" "10 300"
 check 0 1200 25 0   "0 files counts as one wave"                    "1 wave(s)" "25 1200"
+check 0 1200 25 08  "a zero-padded count is decimal, not octal"     "1 wave(s)" "16 960"
+check 1 01200 25 3  "rejects a zero-padded request timeout"         "LLM_TIMEOUT_SEC must be a positive integer"
+check 1 1200 025 3  "rejects a zero-padded deadline"                "TASK_TIMEOUT_MIN must be a positive integer"
 
 # Which limits were shortened, for the notice's advice.
 flags() {  # $1 llm, $2 task, $3 files, $4 label, $5 expected "task llm" flags
   : > "$WORK/gh_out"
   LLM_TIMEOUT_SEC="$1" TASK_TIMEOUT_MIN="$2" CHANGED_FILES="$3" GITHUB_OUTPUT="$WORK/gh_out" \
     bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
-  local got
+  local rc=$? got
+  # Flags written before a later failure would pass here while production
+  # skipped every attempt.
+  if [ "$rc" -ne 0 ]; then
+    fail=$((fail+1)); echo "  FAIL  $4 (step exited $rc)"; sed 's/^/        /' "$WORK/out"; return
+  fi
   got="$(sed -n 's/^task_shortened=//p' "$WORK/gh_out") $(sed -n 's/^llm_shortened=//p' "$WORK/gh_out")"
   if [ "$got" = "$5" ]; then pass=$((pass+1)); echo "  ok    $4"
   else fail=$((fail+1)); echo "  FAIL  $4 (flags '$got', expected '$5')"; fi
@@ -123,7 +138,8 @@ flags 1200 25 11 "deadline and request both shortened"          "true true"
 : > "$WORK/gh_out"
 LLM_TIMEOUT_SEC=1200 TASK_TIMEOUT_MIN=25 CHANGED_FILES=1 GITHUB_OUTPUT="$WORK/gh_out" \
   bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
-if grep -qx "effort=medium" "$WORK/gh_out"; then
+rc=$?
+if [ "$rc" -eq 0 ] && grep -qx "effort=medium" "$WORK/gh_out"; then
   pass=$((pass+1)); echo "  ok    effort is pinned to medium"
 else
   fail=$((fail+1)); echo "  FAIL  effort output is not 'medium'"; sed 's/^/        /' "$WORK/out"

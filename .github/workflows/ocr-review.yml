@@ -72,11 +72,11 @@ on:
           for this fleet's real files rather than only for pathological ones.
           Must not exceed `review_task_timeout_min` × 60: a single request
           cannot usefully outlast the per-file task deadline that contains it.
-          The "Check review time limits" step enforces this. On a PR of more
-          than 8 files the per-file deadline is shortened to fit the attempt,
-          and this value is clamped to that shorter deadline, so the 1200 here
-          is the budget only for PRs small enough to keep it (up to 8 files at
-          the default deadline: 4-8 files get 16 minutes, 960s).
+          The "Check review time limits" step enforces this. From 4 changed
+          files upward the per-file deadline is shortened to fit the attempt
+          (4+ files add a grouping request), and this value is clamped to that
+          shorter deadline, so the 1200 here is the budget only for PRs of up to
+          3 files at the default deadline; 4-8 files get 16 minutes, 960s.
 
           Raised 600 -> 1200 (2026-10-03): marketing-as-code PR #363 still hit
           `timeout` at 600s on ~200-line Python modules, across several runs.
@@ -160,11 +160,13 @@ jobs:
     runs-on: ubuntu-latest
     # Each review attempt has its own 60-minute step timeout, so a hung LLM
     # endpoint cannot consume the whole job budget; 210 covers three sequential
-    # attempts (3 × 60) plus 30 minutes for PR context, the limits check, the
-    # install cleanups, the completeness gate's API calls and the Copilot step,
-    # each of which has its own timeout-minutes summing to 20, so the reserve
-    # is enforced rather than assumed and the final fail-gate step still runs
-    # instead of being cancelled by the job timeout.
+    # attempts (3 × 60) plus a 30-minute reserve. The other eight steps (PR
+    # context, the limits check, two install cleanups, the completeness gate,
+    # the limits notice, the fail-gate and the Copilot step) each have their
+    # own timeout-minutes, summing to 22, so the reserve is enforced rather
+    # than assumed, leaves 8 minutes for runner setup and teardown, and the
+    # final fail-gate step still runs instead of being cancelled by the job
+    # timeout. Recheck this sum when any step budget changes.
     #
     # Nesting, enforced by "Check review time limits": the request timeout fits
     # in the per-file deadline, and every wave of per-file deadlines (derived
@@ -371,6 +373,8 @@ jobs:
 
       - name: Run OpenCodeReview (primary)
         id: ocr-primary
+        # Explicit: an attempt must never run with empty limits outputs.
+        if: ${{ steps.limits.outcome == 'success' }}
         # v1.13.3 — pinned to the release commit SHA, not @main. Upgraded from
         # v1.8.6 (2026-10-27) for `review_task_timeout`; inputs used here are
         # unchanged, incremental review stays off by default (full PR each
@@ -427,7 +431,8 @@ jobs:
         # and any half-renamed `.open-code-review-*` sibling — gives the
         # fallback a clean install.
         if: >-
-          steps.ocr-primary.outcome == 'failure'
+          steps.limits.outcome == 'success'
+          && steps.ocr-primary.outcome == 'failure'
           && env.OCR_FALLBACK1_CONFIGURED == 'true'
         shell: bash
         run: |
@@ -447,7 +452,8 @@ jobs:
         # can repeat. Accepted: a duplicated review beats a silently missing
         # one, and history is never deleted.
         if: >-
-          steps.ocr-primary.outcome == 'failure'
+          steps.limits.outcome == 'success'
+          && steps.ocr-primary.outcome == 'failure'
           && env.OCR_FALLBACK1_CONFIGURED == 'true'
         timeout-minutes: 60
         continue-on-error: true
@@ -481,7 +487,8 @@ jobs:
         # and any half-renamed `.open-code-review-*` sibling — gives the
         # fallback a clean install.
         if: >-
-          steps.ocr-primary.outcome == 'failure'
+          steps.limits.outcome == 'success'
+          && steps.ocr-primary.outcome == 'failure'
           && steps.ocr-fallback1.outcome != 'success'
           && env.OCR_FALLBACK2_CONFIGURED == 'true'
         shell: bash
@@ -497,7 +504,8 @@ jobs:
         # (failed, or was skipped because it isn't configured), and a second
         # fallback backend is fully configured.
         if: >-
-          steps.ocr-primary.outcome == 'failure'
+          steps.limits.outcome == 'success'
+          && steps.ocr-primary.outcome == 'failure'
           && steps.ocr-fallback1.outcome != 'success'
           && env.OCR_FALLBACK2_CONFIGURED == 'true'
         timeout-minutes: 60
@@ -549,9 +557,12 @@ jobs:
         # Runs whenever an attempt SUCCEEDED — the all-failed case belongs to
         # the next step, where /tmp/ocr-result.json is absent or stale.
         if: >-
-          steps.ocr-primary.outcome == 'success'
+          steps.limits.outcome == 'success'
+          && (
+            steps.ocr-primary.outcome == 'success'
           || steps.ocr-fallback1.outcome == 'success'
           || steps.ocr-fallback2.outcome == 'success'
+          )
         shell: bash
         env:
           # BEA-327: never interpolate a context value into a run body.
@@ -915,8 +926,11 @@ jobs:
                 owner, repo, issue_number: prNumber, per_page: 100,
               });
               const mine = comments.filter((c) => c.user && c.user.type === "Bot" && c.body && c.body.includes(marker));
-              // Update every one: a transient lookup failure can leave two.
-              for (const c of mine) {
+              // Update every one: a transient lookup failure can leave two. On
+              // success only notices still claiming a failure: a cleared notice is
+              // terminal, so later green runs do not rewrite it with a new run link.
+              const targets = failed ? mine : mine.filter((c) => c.body.includes("## ❌ OpenCodeReview did not run"));
+              for (const c of targets) {
                 if (c.body !== body) {
                   await github.rest.issues.updateComment({ owner, repo, comment_id: c.id, body });
                 }
