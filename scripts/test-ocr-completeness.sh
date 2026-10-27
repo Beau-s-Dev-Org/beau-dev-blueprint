@@ -145,6 +145,11 @@ FAIL2='[{"item_id":"2","path":"b.py","classification":"timeout","reason":"file r
 
 PARTIAL=$(mk partial partial "$ONE" "$FAIL2" '[]' '[]')
 # Every file failed (#73 on v1.13.3): OCR says "failed", not "partial".
+# ...and a run that failed before selecting anything must not read as
+# "selected no files" and clear the PR's notice.
+FAILED_EMPTY=$(mk failed failed '[]' '[]' '[]' '[]' '"selected":[]')
+FAILED_STATUS_ONLY=$(mk failed complete '[]' '[]' '[]' '[]' '"selected":[]')
+FAILED_TERMINAL_ONLY=$(mk success failed '[]' '[]' '[]' '[]' '"selected":[]')
 ALL_FAILED=$(mk failed failed '[]' '[{"item_id":"1","path":"a.py","classification":"timeout"},{"item_id":"2","path":"b.py","classification":"timeout"},{"item_id":"3","path":"c.py","classification":"timeout"}]' '[]' '[]')
 COMPLETE=$(mk success complete "$ALL3" '[]' '[]' '[]')
 TERMINAL_ONLY=$(mk success partial "$ALL3" '[]' '[]' '[]')
@@ -229,6 +234,9 @@ run_case "  ...and reports the reason"             1 "$PARTIAL"           "file 
 run_case "  ...and says how much was covered"      1 "$PARTIAL"           "1 of 3"
 run_case "a review where every file failed fails"  1 "$ALL_FAILED"        "covered 0 of 3"
 run_case "  ...and names the files"               1 "$ALL_FAILED"        'OCR did not review `a.py`'
+run_case "a failed run with nothing selected fails" 1 "$FAILED_EMPTY"     "A partial review is not an approval"
+run_case "  ...status failed alone is enough"      1 "$FAILED_STATUS_ONLY" "A partial review is not an approval"
+run_case "  ...terminal_state failed alone too"    1 "$FAILED_TERMINAL_ONLY" "A partial review is not an approval"
 run_case "a complete review passes"                0 "$COMPLETE"          "reviewed every item it selected"
 run_case "the shape OCR actually emits passes"     0 "$REAL_SHAPE"        "reviewed every item it selected"
 run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED'

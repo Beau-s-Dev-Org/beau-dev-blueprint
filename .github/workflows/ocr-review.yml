@@ -585,6 +585,12 @@ jobs:
           DECLARED_PARTIAL=no
           [ "$STATUS" = "partial" ] && DECLARED_PARTIAL=yes
           [ "$TERMINAL" = "partial" ] && DECLARED_PARTIAL=yes
+          # "failed" is at least as incomplete as "partial". Since this gate
+          # also runs after a failed attempt, a run that failed before it
+          # selected anything would otherwise read as "selected no files" and
+          # clear the PR's notice green (Codex fallback review, #76).
+          [ "$STATUS" = "failed" ] && DECLARED_PARTIAL=yes
+          [ "$TERMINAL" = "failed" ] && DECLARED_PARTIAL=yes
 
           # Every "we cannot tell" path goes through here. Unknown is not the
           # same as verified, so it is reported loudly — but it does not fail
