@@ -1,5 +1,8 @@
 """Shared fixtures for the local_review.py tests (BEA-591).
 
+Helpers here are named lr_*.py, never test*.py: CI requires every test*.py
+module to run at least one test, so a helper with that name would fail it.
+
 The tests are split across test_detect_author.py, test_route.py and
 test_verdict.py. One 540-line module was too large for OCR to review within
 its per-file time limit (PR #73), and a review that times out is not a review.

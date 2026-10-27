@@ -104,9 +104,9 @@ jobs:
           # Derived from the files, so a module added later is covered too.
           for path in scripts/local-review/test*.py; do   # discover's own pattern
             module=$(basename "$path" .py)
-            # A helper that matches test*.py but defines no tests prints
-            # nothing, and must not turn the gate red.
-            grep -q 'def test' "$path" || continue
+            # No content-based skipping: a test module that lost its tests
+            # must fail here. Shared helpers are named lr_*.py (lr_testkit.py),
+            # so they never match test*.py.
             grep -qF "($module." "$RUNNER_TEMP/local-review-tests.log" || missing="$missing $module"
           done
           [ -z "$missing" ] || {
