@@ -117,7 +117,8 @@ class RepoHoldPaths(Base):
                      "scripts/rollout-ocr.sh", "scripts/requirements.txt",
                      "codex-template.md", ".gitignore-template",
                      "docs/AI-COLLABORATOR-GUIDE-template.md", "docs/PROPOSAL-FORMAT.md",
-                     "docs/GEMINI-GUIDE-template.md", "AGENTS-template"):   # future templates too
+                     "docs/GEMINI-GUIDE-template.md", "AGENTS-template",   # future templates too
+                     "SPEC_TEMPLATE.md", "docs/spec_template.md", "PULL_REQUEST_TEMPLATE.md"):
             self.assertEqual(self.tier(root, path), (0, "hold"), path)
 
     def test_a_missing_repo_root_is_an_error_not_no_policy(self):
@@ -241,7 +242,8 @@ reviewers:
 
     def test_config_rejects_hold_paths_that_are_not_a_list_of_strings(self):
         # Falsy shapes too: "", {} and false must not read as "no hold paths".
-        for hold in ("'^scripts/'", "{'^a': 1}", "[1]", "''", "{}", "false", "null", ""):
+        for hold in ("'^scripts/'", "{'^a': 1}", "[1]", "''", "{}", "false", "null", "",
+                     "['']", "['  ']"):
             path = self.config(self.BASE.replace("hold_paths: []", f"hold_paths: {hold}")
                                + "  - {id: c, family: openai, agent: codex, enabled: true}\n")
             code, _, err = self.run_cli("--config", path, "unavailable", "--reason", "x")
@@ -278,6 +280,14 @@ reviewers:
             code, err = self.load(f"  - {entry}\n")
             self.assertEqual(code, 2, entry)
             self.assertIn("reviewer c", err, entry)
+
+    def test_config_rejects_an_empty_family_pattern(self):
+        for pat in ("''", "'  '"):
+            text = self.BASE.replace("anthropic: 'claude'", f"anthropic: {pat}") \
+                + "  - {id: c, family: openai, agent: codex, enabled: true}\n"
+            code, _, err = self.run_cli("--config", self.config(text), "unavailable", "--reason", "x")
+            self.assertEqual(code, 2, pat)
+            self.assertIn("families must be", err)
 
     def test_config_rejects_wrong_typed_families_and_max_rounds(self):
         for text in (self.BASE.replace("families: {anthropic: 'claude', openai: 'gpt', google: 'gemini'}",

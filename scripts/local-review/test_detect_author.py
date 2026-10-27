@@ -59,6 +59,7 @@ class DetectAuthor(Base):
         # review. Adding the coordinator early would leave one family.
         log = self.log("feat: x\n\nCo-Authored-By: Codex <noreply@openai.com>\n")
         code, out, _ = self.run_cli("detect-author", "--log-file", log)
+        self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["families"], ["openai"])
         code, plan, _ = self.route("openai", "--no-advance", files=(".github/workflows/ci.yml",))
         self.assertEqual(code, 0)

@@ -73,7 +73,10 @@ def load_config(path):
     # the code for "not clean", not the code for "bad config" (PR #73, twice).
     families = cfg.get("families")
     if not isinstance(families, dict) or not families \
-            or not all(isinstance(k, str) and k and isinstance(v, str) for k, v in families.items()):
+            or not all(isinstance(k, str) and k and isinstance(v, str) and v.strip()
+                       for k, v in families.items()):
+        # An empty pattern matches everything: every trailer and model would
+        # count as that family. Same for an empty hold path, below.
         raise UsageError("families must be a non-empty mapping of family name to regex string")
     try:
         cfg["_family_re"] = {name: re.compile(pat) for name, pat in families.items()}
@@ -118,8 +121,8 @@ def load_config(path):
     # `hold_paths:` line) into None; both silently switched the hold tier off
     # (PR #73). To mean "no hold paths", write `hold_paths: []`.
     hold = cfg["hold_paths"] if "hold_paths" in cfg else []
-    if not isinstance(hold, list) or not all(isinstance(p, str) for p in hold):
-        raise UsageError("hold_paths must be a list of regex strings")
+    if not isinstance(hold, list) or not all(isinstance(p, str) and p.strip() for p in hold):
+        raise UsageError("hold_paths must be a list of non-empty regex strings")
     try:
         cfg["_hold_re"] = [re.compile(p) for p in hold]
     except (re.error, TypeError) as exc:
