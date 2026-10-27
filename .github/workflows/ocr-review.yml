@@ -869,13 +869,17 @@ jobs:
 
       - name: Report a limits error on the PR
         # A limits failure skips every attempt and the completeness gate, so
-        # without this the PR would show a red check and nothing else.
-        if: failure() && steps.limits.outcome == 'failure'
+        # without this the PR would show a red check and nothing else. On a
+        # later successful limits check it clears that notice, the way the
+        # completeness gate clears its own, so a fixed stub does not leave a
+        # comment claiming no review ran.
+        if: ${{ !cancelled() && (steps.limits.outcome == 'failure' || steps.limits.outcome == 'success') }}
         timeout-minutes: 2   # bounded, so the job's 30-minute reserve holds
         uses: actions/github-script@v9
         env:
           # BEA-327: never interpolate a context value into a script body.
           LIMITS_ERROR: ${{ steps.limits.outputs.error }}
+          LIMITS_OUTCOME: ${{ steps.limits.outcome }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
@@ -887,15 +891,23 @@ jobs:
             // Plain text only: backticks and angle brackets cannot become markup.
             const reason = (process.env.LIMITS_ERROR || "the limits step failed without a reason")
               .replace(/[`<>]/g, "'");
-            const body = `${marker}\n## ❌ OpenCodeReview did not run\n\nThe review time limits could not be set, so no review attempt ran:\n\n> ${reason}\n\nFix the caller stub (or the PR) and push, or re-run with \`/open-code-review\`.\n\n<sub>[Run log](${process.env.RUN_URL})</sub>`;
+            const failed = process.env.LIMITS_OUTCOME === "failure";
+            const body = failed
+              ? `${marker}\n## ❌ OpenCodeReview did not run\n\nThe review time limits could not be set, so no review attempt ran:\n\n> ${reason}\n\nFix the caller stub (or the PR) and push, or re-run with \`/open-code-review\`.\n\n<sub>[Run log](${process.env.RUN_URL})</sub>`
+              : `${marker}\n## ✅ OpenCodeReview time limits\n\nA later run set its time limits, so the "did not run" notice above no longer applies.\n\n<sub>[Run log](${process.env.RUN_URL})</sub>`;
             try {
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner, repo, issue_number: prNumber, per_page: 100,
               });
               const mine = comments.filter((c) => c.user && c.user.type === "Bot" && c.body && c.body.includes(marker));
-              if (mine.length) {
-                await github.rest.issues.updateComment({ owner, repo, comment_id: mine[mine.length - 1].id, body });
-              } else {
+              // Update every one: a transient lookup failure can leave two.
+              for (const c of mine) {
+                if (c.body !== body) {
+                  await github.rest.issues.updateComment({ owner, repo, comment_id: c.id, body });
+                }
+              }
+              // Post only on failure; success with no earlier notice says nothing.
+              if (!mine.length && failed) {
                 await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
               }
             } catch (err) {
