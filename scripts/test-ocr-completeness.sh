@@ -34,15 +34,18 @@ open(out, "w").write("#!/bin/bash\n" + match[0]["run"])
 want = {
     "TASK_TIMEOUT_MIN": "${{ steps.limits.outputs.task_minutes }}",
     "LLM_TIMEOUT_SEC": "${{ steps.limits.outputs.llm_timeout_sec }}",
-    "CONFIGURED_TASK_MIN": "${{ inputs.review_task_timeout_min }}",
-    "TASK_SHORTENED": "${{ steps.limits.outputs.task_shortened }}",
-    "TASK_CEILING": "${{ steps.limits.outputs.task_ceiling }}",
     "LLM_SHORTENED": "${{ steps.limits.outputs.llm_shortened }}",
 }
 env = match[0].get("env") or {}
 for k, v in want.items():
     if env.get(k) != v:
         sys.exit(f"env {k} is {env.get(k)!r}, expected {v!r}")
+# The gate must run whenever an attempt ran, not only when one succeeded:
+# an all-files failure is reported as "failed", fails the attempt step, and
+# skipping the gate then left an older run's notice on the PR (#73).
+cond = " ".join(str(match[0].get("if", "")).replace("${{", "").replace("}}", "").split())
+if cond != "steps.limits.outcome == 'success' && steps.ocr-primary.outcome != 'skipped'":
+    sys.exit(f"the gate's condition is {cond!r}; it must run whenever the primary attempt ran")
 PY
 # Wiring checks exit after step.sh is written; no -e here, so check status.
 [ "$?" -eq 0 ] || { echo "FAIL: extraction or env-wiring checks failed"; exit 1; }
@@ -141,6 +144,8 @@ ONE='[{"item_id":"1","path":"a.py"}]'
 FAIL2='[{"item_id":"2","path":"b.py","classification":"timeout","reason":"file review exceeded its time limit"},{"item_id":"3","path":"c.py","classification":"error"}]'
 
 PARTIAL=$(mk partial partial "$ONE" "$FAIL2" '[]' '[]')
+# Every file failed (#73 on v1.13.3): OCR says "failed", not "partial".
+ALL_FAILED=$(mk failed failed '[]' '[{"item_id":"1","path":"a.py","classification":"timeout"},{"item_id":"2","path":"b.py","classification":"timeout"},{"item_id":"3","path":"c.py","classification":"timeout"}]' '[]' '[]')
 COMPLETE=$(mk success complete "$ALL3" '[]' '[]' '[]')
 TERMINAL_ONLY=$(mk success partial "$ALL3" '[]' '[]' '[]')
 STATUS_ONLY=$(mk partial complete "$ALL3" '[]' '[]' '[]')
@@ -222,6 +227,8 @@ run_case "a partial review fails the job"          1 "$PARTIAL"           "A par
 run_case "  ...and names every unreviewed file"    1 "$PARTIAL"           'OCR did not review `c.py`'
 run_case "  ...and reports the reason"             1 "$PARTIAL"           "file review exceeded its time limit"
 run_case "  ...and says how much was covered"      1 "$PARTIAL"           "1 of 3"
+run_case "a review where every file failed fails"  1 "$ALL_FAILED"        "covered 0 of 3"
+run_case "  ...and names the files"               1 "$ALL_FAILED"        'OCR did not review `a.py`'
 run_case "a complete review passes"                0 "$COMPLETE"          "reviewed every item it selected"
 run_case "the shape OCR actually emits passes"     0 "$REAL_SHAPE"        "reviewed every item it selected"
 run_case "a multi-line reason stays one entry"     1 "$MULTILINE_REASON"  'boom\n::error::FORGED'
@@ -337,51 +344,41 @@ else
 fi
 
 # The timeout advice on the PR: suggest only a raise that would take effect.
-# One case per state the limits step can hand over (Codex, PR #74): headroom
-# on the deadline, headroom on the request only, both at the ceiling on a
-# small PR, and shortened to fit a large one.
-advice() {  # name, task_min, llm_sec, task_shortened, llm_shortened, want, must_not[, configured_min[, ceiling]]
-  # configured defaults to the deadline: an unshortened deadline IS the configured one.
+# One case per state the limits step can hand over: headroom on the deadline,
+# on the request only, on both, on neither, and a clamped request.
+advice() {  # name, task_min, llm_sec, llm_shortened, want, must_not
   : > "$WORK/gh.log"; : > "$WORK/comment.md"; printf '%s' "$PARTIAL" > "$WORK/result.json"
   PATH="$WORK/bin:$PATH" GH_TOKEN=x PR_NUMBER=1 REPO=o/r RUN_URL=http://run \
     OCR_RESULT_FILE="$WORK/result.json" OCR_COMMENT_FILE="$WORK/comment.md" \
-    GITHUB_STEP_SUMMARY="$WORK/summary.md" CONFIGURED_TASK_MIN="${8:-$2}" TASK_CEILING="${9:-25}" \
-    TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" TASK_SHORTENED="$4" LLM_SHORTENED="$5" \
+    GITHUB_STEP_SUMMARY="$WORK/summary.md" \
+    TASK_TIMEOUT_MIN="$2" LLM_TIMEOUT_SEC="$3" LLM_SHORTENED="$4" \
     bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/advice.out" 2>&1; local rc=$?
   # Empty text would make grep -qF match anything, either way round.
-  if [ -z "$6" ] || [ -z "$7" ]; then
+  if [ -z "$5" ] || [ -z "$6" ]; then
     echo "  FAIL  $1 (empty want/must-not: grep -qF \"\" matches anything)"; FAIL=$((FAIL+1)); return
   fi
   # A partial review must stay red whatever the limits state is.
-  if [ "$rc" = 1 ] && grep -qF "$6" "$WORK/comment.md" && ! grep -qF "$7" "$WORK/comment.md"; then
+  if [ "$rc" = 1 ] && grep -qF "$5" "$WORK/comment.md" && ! grep -qF "$6" "$WORK/comment.md"; then
     echo "  ok    $1"; PASS=$((PASS+1))
   else
     # Step output too, so a crash (exit 1, empty comment) reads differently
     # from changed advice text.
-    echo "  FAIL  $1 (exit $rc, wanted 1; wanted '$6', must not '$7')"
+    echo "  FAIL  $1 (exit $rc, wanted 1; wanted '$5', must not '$6')"
     sed 's/^/        /' "$WORK/advice.out"; sed 's/^/        /' "$WORK/comment.md"; FAIL=$((FAIL+1))
   fi
 }
-advice "advice: deadline below 25 suggests raising it" 20 1200 false false \
-  'Raise `review_task_timeout_min`' 'already at their ceiling'
-advice "advice: both with room offers both"           20 300 false false \
+advice "advice: deadline below 25 suggests raising it" 20 1200 false \
+  'Raise `review_task_timeout_min` (at most 25)' 'already at their ceiling'
+advice "advice: both with room offers both"            20 300 false \
   'and/or `llm_timeout_sec`' 'already at their ceiling'
-advice "advice: only the request has room"             25 1200 false false \
+advice "advice: only the request has room"             25 1200 false \
   'Raise `llm_timeout_sec`, up to 1500s' 'Raise `review_task_timeout_min`'
-advice "advice: deadline configured at the size cap says split" 10 600 false false \
-  'most this PR' 'Raise `' 10 10
-advice "  ...and with request room offers only the request" 10 300 false false \
-  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 10 10
-advice "advice: below a size cap offers up to the cap" 7 300 false false \
-  '(at most 10)' 'already at their ceiling' 7 10
-advice "advice: both at the ceiling says split"        25 1500 false false \
+advice "advice: both at the ceiling says split"        25 1500 false \
   'already at their ceiling' 'Raise `'
-advice "advice: shortened deadline, request has room"  10 300 true false \
-  'Raise `llm_timeout_sec`, up to 600s' 'Raise `review_task_timeout_min`' 25 10
-advice "advice: shortened and full says split"         10 600 true true \
-  'already at their ceiling' 'Raise `' 25 10
-advice "  ...and says the deadline was shortened"      10 600 true true \
-  '25 min), so raising' 'Raise `' 25 10
+advice "advice: a clamped request is not offered"      10 600 true \
+  'Raise `review_task_timeout_min`' 'Raise `llm_timeout_sec`'
+advice "advice: names a task as a file or a bundle"    25 1500 false \
+  'a bundle of' 'per file per'
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

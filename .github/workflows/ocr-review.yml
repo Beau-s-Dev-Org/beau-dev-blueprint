@@ -71,12 +71,9 @@ on:
           ordinary source files (a ~900-line test module), so 300 is too tight
           for this fleet's real files rather than only for pathological ones.
           Must not exceed `review_task_timeout_min` × 60: a single request
-          cannot usefully outlast the per-file task deadline that contains it.
-          The "Check review time limits" step enforces this. From 4 changed
-          files upward the per-file deadline is shortened to fit the attempt
-          (4+ files add a grouping request), and this value is clamped to that
-          shorter deadline, so the 1200 here is the budget only for PRs of up to
-          3 files at the default deadline; 4-8 files get 16 minutes, 960s.
+          cannot usefully outlast the per-task deadline that contains it.
+          The "Check review time limits" step enforces this by clamping it to
+          that deadline (25 minutes, 1500s, at the defaults).
 
           Raised 600 -> 1200 (2026-10-03): marketing-as-code PR #363 still hit
           `timeout` at 600s on ~200-line Python modules, across several runs.
@@ -94,19 +91,25 @@ on:
         default: '1200'
       review_task_timeout_min:
         description: >-
-          Per-file task deadline in minutes (OCR's `ocr review --timeout`,
-          passed as the action's `review_task_timeout`). It covers every LLM
-          call, tool call and retry for one file, so it is the limit that
-          decides `timeout` in the completeness report. OCR's default is 15.
+          Per-task deadline in minutes (OCR's `ocr review --timeout`, passed
+          as the action's `review_task_timeout`). A task is one review group:
+          from 4 files, v1.13.3 first asks the model to bundle related files,
+          and a whole bundle shares one deadline. It covers every LLM call,
+          tool call and retry for that group, so it is the limit that decides
+          `timeout` in the completeness report. OCR's default is 15. Allowed
+          range 1-25; higher is clamped to 25.
 
           25 (2026-10-27): files in beau-dev-blueprint #73 hit the old fixed
-          10. The deadline applies per review round, and effort is pinned to
-          medium (2 rounds), so 25 × 2 plus install and posting fits the
-          60-minute attempt for a PR of up to 3 files. Allowed range 1-25.
-          For larger PRs "Check review time limits" passes a shorter deadline,
-          50 / (waves × rounds + 1 for OCR's grouping request from 4 files),
-          so the attempt still ends in a readable partial review instead of a
-          killed step.
+          10. The deadline applies per review round (effort is pinned to
+          medium, 2 rounds), so one round of up to 8 concurrent groups takes
+          at most 25 × 2 minutes, after a grouping request of at most one
+          deadline: 75 minutes inside the 80-minute attempt.
+
+          It is no longer shortened by PR size. #74 cut it by the changed-file
+          count, assuming one task per file; on #73 (15 files, 2026-10-27) all
+          8 selected files then landed in ONE bundle with a 10-minute deadline
+          and every one timed out. A PR producing more than 8 groups can still
+          outrun the attempt; that fails visibly, and splitting it is the fix.
         required: false
         type: string
         default: '25'
@@ -158,9 +161,9 @@ on:
 jobs:
   code-review:
     runs-on: ubuntu-latest
-    # Each review attempt has its own 60-minute step timeout, so a hung LLM
-    # endpoint cannot consume the whole job budget; 210 covers three sequential
-    # attempts (3 × 60) plus a 30-minute reserve. The other eight steps (PR
+    # Each review attempt has its own 80-minute step timeout, so a hung LLM
+    # endpoint cannot consume the whole job budget; 270 covers three sequential
+    # attempts (3 × 80) plus a 30-minute reserve. The other eight steps (PR
     # context, the limits check, two install cleanups, the completeness gate,
     # the limits notice, the fail-gate and the Copilot step) each have their
     # own timeout-minutes, summing to 22, so the reserve is enforced rather
@@ -169,13 +172,14 @@ jobs:
     # timeout. Recheck this sum when any step budget changes.
     #
     # Nesting, enforced by "Check review time limits": the request timeout fits
-    # in the per-file deadline, and every wave of per-file deadlines (derived
-    # from the PR's file count) fits in the 60-minute step. If a limit can outlast the step that contains it, a
-    # slow file stops producing a partial review — which the gate reports
-    # precisely, naming the files it skipped — and starts producing a killed
-    # step, which reports nothing useful and burns the attempt. Raising one
-    # without the other trades a legible failure for an illegible one.
-    timeout-minutes: 210
+    # in the per-task deadline, and the grouping request plus one round of
+    # concurrent groups (25 + 2 × 25 = 75 minutes) fits in the 80-minute step.
+    # If a limit can outlast the step that contains it, a slow group stops
+    # producing a partial review — which the gate reports precisely, naming
+    # the files it skipped — and starts producing a killed step, which reports
+    # nothing useful and burns the attempt. Raising one without the other
+    # trades a legible failure for an illegible one.
+    timeout-minutes: 270
     # Declared here rather than inherited. A reusable workflow with no
     # permissions block takes the caller's, so what this job can do depended on
     # every consuming repo's stub and on repository defaults — under a
@@ -267,7 +271,6 @@ jobs:
             });
             core.setOutput('base_ref', pullRequest.base.ref);
             core.setOutput('head_sha', pullRequest.head.sha);
-            core.setOutput('changed_files', String(pullRequest.changed_files));
 
       - name: Check review time limits
         id: limits
@@ -277,36 +280,29 @@ jobs:
         # completeness gate can read instead of a killed step that reports
         # nothing.
         #
-        # OCR reviews 8 files at once, so a PR of N changed files runs in
-        # ceil(N/8) waves. Each file may take up to the task deadline times its
-        # review rounds (v1.13.3 internal/agent/agent.go:677), and the rounds
-        # come from the effort level, pinned here to medium = 2 rounds
-        # (internal/config/template/effort.go). The attempt step is a fixed 60
-        # minutes, 10 of them reserved for install, checkout and comment
-        # posting. From 4 files OCR first sends one grouping request
-        # (GROUPING_MIN_FILES in its task template) BEFORE any per-file clock
-        # starts; that request is bounded by the request timeout, which is
-        # clamped to the deadline, so it costs at most one more deadline-sized
-        # slot. The deadline passed is therefore
-        #   min(review_task_timeout_min,
-        #       floor(50 / (waves * rounds + (files >= 4 ? 1 : 0)))):
-        # 1-3 files get the full 25 minutes per round, 4-8 get 16, 9-16 get 10,
-        # and so on; a large PR gets a shorter deadline and a legible partial
-        # review rather than a killed attempt. The request timeout is clamped
-        # to fit inside the deadline. The changed-file count includes files OCR will
-        # skip (deletions, Markdown), so it is an upper bound and errs toward
-        # shorter deadlines, never longer; past 200 files the deadline sits at
-        # a 1-minute floor with a warning rather than blocking the review. A
-        # count that cannot be read is an error, not a guess: both supported
-        # events always provide it.
+        # OCR v1.13.3 reviews in tasks, one per review group. From 4 files
+        # (GROUPING_MIN_FILES in its task template) it first sends one grouping
+        # request that bundles related files, and a whole bundle then shares
+        # one task deadline; smaller PRs get a group per file. Up to 8 groups
+        # run at once. Each may take the deadline times its review rounds
+        # (internal/agent/agent.go:677), and rounds come from the effort level,
+        # pinned here to medium = 2 (internal/config/template/effort.go). The
+        # grouping request runs before any task clock and is bounded by the
+        # request timeout, which is clamped to the deadline. So at the 25-minute
+        # cap one attempt needs at most 25 + 2 × 25 = 75 minutes for up to 8
+        # groups, inside the 80-minute attempt step.
+        #
+        # The deadline is NOT shortened by PR size. #74 did that from the
+        # changed-file count, assuming a task per file; on #73 the 8 selected
+        # files formed one bundle, got a 10-minute deadline for all of them,
+        # and every one timed out. Group count is only known once OCR has
+        # grouped, so there is nothing reliable to shorten by; a PR producing
+        # more than 8 groups may outrun the attempt, visibly.
         shell: bash
         env:
           # BEA-327: never interpolate a context value into a run body.
           LLM_TIMEOUT_SEC: ${{ inputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ inputs.review_task_timeout_min }}
-          # By event, not `a || b`: a genuine 0 is falsy in expressions and
-          # would fall through to an output that is empty on this path.
-          CHANGED_FILES: ${{ github.event_name == 'issue_comment' && steps.pr-context.outputs.changed_files || github.event.pull_request.changed_files }}
         run: |
           set -euo pipefail
           # Errors are also written as an output, for "Report a limits error
@@ -321,61 +317,28 @@ jobs:
           for v in LLM_TIMEOUT_SEC TASK_TIMEOUT_MIN; do
             [[ "${!v}" =~ ^[1-9][0-9]{0,4}$ ]] || die "${v} must be a positive integer, got '${!v}'."
           done
-          # Out-of-range settings are clamped by the derivation below (the
-          # deadline never exceeds 25, the request never exceeds the deadline),
-          # so they warn rather than fail: an older stub that raised them keeps
-          # getting a review.
+          # Out-of-range settings are clamped below (the deadline never exceeds
+          # 25, the request never exceeds the deadline), so they warn rather
+          # than fail: an older stub that raised them keeps getting a review.
           if (( TASK_TIMEOUT_MIN > 25 )); then
-            echo "::warning::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; using at most 25 (one wave of 8 files at 2 review rounds must fit the 60-minute attempt step)."
+            echo "::warning::review_task_timeout_min is ${TASK_TIMEOUT_MIN}; using at most 25 (the grouping request plus 2 review rounds must fit the 80-minute attempt)."
           fi
           if (( LLM_TIMEOUT_SEC > TASK_TIMEOUT_MIN * 60 )); then
-            echo "::warning::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute per-file deadline that contains it; it is clamped to that deadline."
+            echo "::warning::llm_timeout_sec is ${LLM_TIMEOUT_SEC}s, longer than the ${TASK_TIMEOUT_MIN}-minute task deadline that contains it; it is clamped to that deadline."
           fi
-          [[ "${CHANGED_FILES:-}" =~ ^[0-9]{1,6}$ ]] \
-            || die "Could not read the PR's changed-file count ('${CHANGED_FILES:-}'), so no per-file deadline can be guaranteed to fit the attempt."
-          N=$(( 10#$CHANGED_FILES ))
-          (( N >= 1 )) || N=1
           EFFORT=medium
           case "$EFFORT" in low) ROUNDS=1 ;; medium) ROUNDS=2 ;; high) ROUNDS=3 ;; esac
-          WAVES=$(( (N + 7) / 8 ))
-          GROUPING=0; (( N >= 4 )) && GROUPING=1   # one grouping request first
-          TASK=$(( 50 / (WAVES * ROUNDS + GROUPING) ))
-          # The most any setting could give this PR: the size-derived cap,
-          # itself capped at 25. Equal to TASK when the configured value
-          # happens to match it, which is still no headroom.
-          CEIL=$TASK; (( CEIL > 25 )) && CEIL=25; (( CEIL < 1 )) && CEIL=1
-          (( TASK > TASK_TIMEOUT_MIN )) && TASK=$TASK_TIMEOUT_MIN
-          if (( TASK < 1 )); then
-            # The count includes files OCR never selects (deletions, Markdown,
-            # lockfiles, generated trees), so the real load may be small. Run
-            # at the 1-minute floor rather than block every review: if the
-            # reviewable load really is this large, the attempt may still be
-            # cut off, and the warning says why.
-            echo "::warning::This PR changes ${N} files (${WAVES} waves of 8, ${ROUNDS} rounds each). Running at the 1-minute per-file floor; if most of those files are reviewable the attempt may not finish. Splitting the PR is the fix."
-            TASK=1
-          fi
+          TASK=$TASK_TIMEOUT_MIN
+          (( TASK > 25 )) && TASK=25
           LLM=$LLM_TIMEOUT_SEC
           (( LLM > TASK * 60 )) && LLM=$(( TASK * 60 ))
-          # Not floored at a minimum: OCR's grouping request runs before any
-          # per-file clock and is bounded only by this value, so a request
-          # longer than the deadline could overrun the attempt. Say plainly
-          # that short requests make timeouts likely, instead.
-          if (( LLM < 300 && LLM < LLM_TIMEOUT_SEC )); then
-            echo "::warning::This PR's size cuts each LLM request to ${LLM}s (below OCR's own 300s default). Expect files to report timeout; splitting the PR is what gives them time."
-          fi
-          if (( TASK < TASK_TIMEOUT_MIN )); then
-            echo "::notice::${N} changed files run in ${WAVES} waves of ${ROUNDS} rounds, so the per-file deadline is ${TASK} min per round (configured ${TASK_TIMEOUT_MIN}) to fit the 60-minute attempt."
-          fi
           echo "task_minutes=${TASK}" >> "$GITHUB_OUTPUT"
           echo "llm_timeout_sec=${LLM}" >> "$GITHUB_OUTPUT"
           echo "effort=${EFFORT}" >> "$GITHUB_OUTPUT"
-          # Which limits this run shortened, so the incomplete-review notice
-          # only recommends raising a setting that would take effect.
-          echo "task_shortened=$( (( TASK < TASK_TIMEOUT_MIN )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          # Whether the request limit was clamped, so the incomplete-review
+          # notice only recommends raising a setting that would take effect.
           echo "llm_shortened=$( (( LLM < LLM_TIMEOUT_SEC )) && echo true || echo false )" >> "$GITHUB_OUTPUT"
-          echo "task_ceiling=${CEIL}" >> "$GITHUB_OUTPUT"
-          echo "Review time limits: ${N} changed files, ${WAVES} wave(s) x ${ROUNDS} rounds; ${LLM}s per request, ${TASK} min per file per round, 60 min per attempt."
-
+          echo "Review time limits: ${LLM}s per request, ${TASK} min per review task per round (${ROUNDS} rounds), 80 min per attempt."
       - name: Run OpenCodeReview (primary)
         id: ocr-primary
         # Explicit: an attempt must never run with empty limits outputs.
@@ -391,7 +354,7 @@ jobs:
         # fallback attempts below instead of failing the job outright; the
         # final "Fail if all review attempts failed" step restores the red X
         # when no attempt succeeds.
-        timeout-minutes: 60
+        timeout-minutes: 80
         continue-on-error: true
         uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
@@ -460,7 +423,7 @@ jobs:
           steps.limits.outcome == 'success'
           && steps.ocr-primary.outcome == 'failure'
           && env.OCR_FALLBACK1_CONFIGURED == 'true'
-        timeout-minutes: 60
+        timeout-minutes: 80
         continue-on-error: true
         uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
@@ -513,7 +476,7 @@ jobs:
           && steps.ocr-primary.outcome == 'failure'
           && steps.ocr-fallback1.outcome != 'success'
           && env.OCR_FALLBACK2_CONFIGURED == 'true'
-        timeout-minutes: 60
+        timeout-minutes: 80
         continue-on-error: true
         uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
@@ -559,15 +522,15 @@ jobs:
         # not approval. This step is what makes that enforceable from the PR
         # page instead of from a log.
         #
-        # Runs whenever an attempt SUCCEEDED — the all-failed case belongs to
-        # the next step, where /tmp/ocr-result.json is absent or stale.
+        # Runs whenever an attempt ran, not only when one succeeded. When every
+        # file fails, OCR reports "failed" rather than "partial" and the
+        # attempt step fails too; skipping this step then left the PR showing
+        # an older run's notice (#73, 2026-10-27). The result read is the last
+        # attempt's that wrote one, for this same head; with none, this step
+        # abstains and the next step still turns the job red.
         if: >-
           steps.limits.outcome == 'success'
-          && (
-            steps.ocr-primary.outcome == 'success'
-          || steps.ocr-fallback1.outcome == 'success'
-          || steps.ocr-fallback2.outcome == 'success'
-          )
+          && steps.ocr-primary.outcome != 'skipped'
         shell: bash
         env:
           # BEA-327: never interpolate a context value into a run body.
@@ -578,9 +541,6 @@ jobs:
           # The values actually used, so the notice below cannot drift from them.
           LLM_TIMEOUT_SEC: ${{ steps.limits.outputs.llm_timeout_sec }}
           TASK_TIMEOUT_MIN: ${{ steps.limits.outputs.task_minutes }}
-          CONFIGURED_TASK_MIN: ${{ inputs.review_task_timeout_min }}
-          TASK_SHORTENED: ${{ steps.limits.outputs.task_shortened }}
-          TASK_CEILING: ${{ steps.limits.outputs.task_ceiling }}
           LLM_SHORTENED: ${{ steps.limits.outputs.llm_shortened }}
         run: |
           set -uo pipefail
@@ -850,44 +810,33 @@ jobs:
               echo
               echo "A review that did not run is not an approval. \`timeout\` means the file"
               echo "hit a time limit and will keep doing so — re-running alone will not help."
-              echo "This run allowed ${TASK_TIMEOUT_MIN:-?} min per file per review round and"
-              echo "${LLM_TIMEOUT_SEC:-?}s per request."
-              # Recommend only a raise that would take effect. One rule for
-              # every case: a setting has headroom when it is below its own
-              # ceiling for this PR. The deadline's is the limits step's
-              # task_ceiling (25, or less on a larger PR), not the configured
-              # value: a deadline configured exactly at the size cap has none.
-              # The request's is 60 x the deadline, unless it was clamped.
+              echo "This run allowed ${TASK_TIMEOUT_MIN:-?} min per review task (a file, or a bundle of"
+              echo "related files) per round and ${LLM_TIMEOUT_SEC:-?}s per request."
+              # Recommend only a raise that would take effect: a setting has
+              # headroom when it is below its own ceiling, 25 minutes for the
+              # deadline and 60 x the deadline for a request (unless clamped).
               # Neither with headroom means a raise cannot help: split.
-              CEIL=${TASK_CEILING:-25}
               TASK_ROOM=; LLM_ROOM=
-              if (( ${TASK_TIMEOUT_MIN:-25} < CEIL )); then
+              if (( ${TASK_TIMEOUT_MIN:-25} < 25 )); then
                 TASK_ROOM=1
               fi
               if [ "${LLM_SHORTENED:-}" != "true" ] \
                  && (( ${LLM_TIMEOUT_SEC:-0} < ${TASK_TIMEOUT_MIN:-0} * 60 )); then
                 LLM_ROOM=1
               fi
-              if [ "${TASK_SHORTENED:-}" = "true" ]; then
-                echo "The per-file limit was shortened to fit this PR's size (configured:"
-                echo "${CONFIGURED_TASK_MIN:-?} min), so raising \`review_task_timeout_min\` will not help."
-              elif [ -z "$TASK_ROOM" ] && (( CEIL < 25 )); then
-                echo "${CEIL} min is the most this PR's size allows per file, so raising"
-                echo "\`review_task_timeout_min\` will not help."
-              fi
               # A `timeout` does not say which limit fired, so when both have
               # headroom, both are offered.
               if [ -n "$TASK_ROOM" ] && [ -n "$LLM_ROOM" ]; then
-                echo "Either limit can be the one that fired: raise \`review_task_timeout_min\` (at most ${CEIL})"
-                echo "and/or \`llm_timeout_sec\` (up to 60 × the deadline), or split the file."
+                echo "Either limit can be the one that fired: raise \`review_task_timeout_min\` (at most 25)"
+                echo "and/or \`llm_timeout_sec\` (up to 60 × the deadline), or split the PR."
               elif [ -n "$TASK_ROOM" ]; then
-                echo "Raise \`review_task_timeout_min\` (at most ${CEIL}); \`llm_timeout_sec\` can then go"
-                echo "up to 60 × the new deadline. Or split the file."
+                echo "Raise \`review_task_timeout_min\` (at most 25); \`llm_timeout_sec\` can then go"
+                echo "up to 60 × the new deadline. Or split the PR."
               elif [ -n "$LLM_ROOM" ]; then
                 echo "Raise \`llm_timeout_sec\`, up to $(( ${TASK_TIMEOUT_MIN:-0} * 60 ))s, or split the PR or the slow files."
               else
-                echo "Both limits are already at their ceiling for this PR, so raising the settings"
-                echo "will not help. Split the PR, or the slow files."
+                echo "Both limits are already at their ceiling, so raising the settings will not"
+                echo "help. Split the PR, or the slow files."
               fi
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"
               echo "the action does not expose); a re-run often finishes, and a smaller file helps."
