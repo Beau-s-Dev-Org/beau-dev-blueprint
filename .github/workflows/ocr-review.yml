@@ -75,7 +75,7 @@ on:
 
           Raised 600 -> 1200 (2026-10-03): marketing-as-code PR #363 still hit
           `timeout` at 600s on ~200-line Python modules, across several runs.
-          1200s stays well inside the 30-minute step timeout below.
+          1200s stayed well inside the 30-minute step timeout of the time.
 
           Raised 1200 -> 2400 (2026-10-27): beau-dev-blueprint PR #73 timed out
           three times running on ordinary 220-540 line files, the last after
