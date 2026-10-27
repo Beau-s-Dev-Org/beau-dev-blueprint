@@ -835,21 +835,31 @@ jobs:
               echo "hit a time limit and will keep doing so — re-running alone will not help."
               echo "This run allowed ${TASK_TIMEOUT_MIN:-?} min per file per review round and"
               echo "${LLM_TIMEOUT_SEC:-?}s per request."
-              # Recommend only a raise that would take effect this way.
-              if [ "${TASK_SHORTENED:-}" != "true" ]; then
-                echo "Those are the caller stub's settings, so either can be the one that fired:"
-                echo "raise \`review_task_timeout_min\` (at most 25) and/or \`llm_timeout_sec\` (at most"
-                echo "60 × the deadline; higher is clamped), or split the file."
-              elif [ "${LLM_SHORTENED:-}" != "true" ] \
-                   && (( ${LLM_TIMEOUT_SEC:-0} < ${TASK_TIMEOUT_MIN:-0} * 60 )); then
+              # Recommend only a raise that would take effect. One rule for
+              # every case: a setting has headroom when it ran as configured
+              # (not shortened to fit the PR) and is below its own ceiling,
+              # 25 min for the deadline and 60 x the deadline for a request.
+              # Neither with headroom means a raise cannot help: split.
+              TASK_ROOM=; LLM_ROOM=
+              if [ "${TASK_SHORTENED:-}" != "true" ] && (( ${TASK_TIMEOUT_MIN:-25} < 25 )); then
+                TASK_ROOM=1
+              fi
+              if [ "${LLM_SHORTENED:-}" != "true" ] \
+                 && (( ${LLM_TIMEOUT_SEC:-0} < ${TASK_TIMEOUT_MIN:-0} * 60 )); then
+                LLM_ROOM=1
+              fi
+              if [ "${TASK_SHORTENED:-}" = "true" ]; then
                 echo "The per-file limit was shortened to fit this PR's size (configured:"
                 echo "${CONFIGURED_TASK_MIN:-?} min), so raising \`review_task_timeout_min\` will not help."
-                echo "\`llm_timeout_sec\` was not shortened: raising it, up to $(( ${TASK_TIMEOUT_MIN:-0} * 60 ))s, may."
-                echo "Otherwise split the PR, or the slow files."
+              fi
+              if [ -n "$TASK_ROOM" ]; then
+                echo "Raise \`review_task_timeout_min\` (at most 25); \`llm_timeout_sec\` can then go"
+                echo "up to 60 × the new deadline. Or split the file."
+              elif [ -n "$LLM_ROOM" ]; then
+                echo "Raise \`llm_timeout_sec\`, up to $(( ${TASK_TIMEOUT_MIN:-0} * 60 ))s, or split the PR or the slow files."
               else
-                echo "The limits were shortened to fit this PR's size (configured: ${CONFIGURED_TASK_MIN:-?} min)"
-                echo "and the request limit already fills the deadline, so raising the settings will"
-                echo "not help. Split the PR, or the slow files."
+                echo "Both limits are already at their ceiling for this PR, so raising the settings"
+                echo "will not help. Split the PR, or the slow files."
               fi
               echo "\`budget\` means the file used up OCR's tool-call rounds per file (a limit"
               echo "the action does not expose); a re-run often finishes, and a smaller file helps."
