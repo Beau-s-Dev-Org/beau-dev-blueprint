@@ -28,7 +28,24 @@ match = [s for s in steps if s.get("name") == step_name]
 if len(match) != 1:
     sys.exit(f"expected exactly one step named {step_name!r}, found {len(match)}")
 open(out, "w").write("#!/bin/bash\n" + match[0]["run"])
+# The cases below inject the limits variables themselves, so they cannot see
+# a dropped or renamed env line; production would then fall back to the
+# defaults and give wrong advice. Check the wiring that feeds them.
+want = {
+    "TASK_TIMEOUT_MIN": "${{ steps.limits.outputs.task_minutes }}",
+    "LLM_TIMEOUT_SEC": "${{ steps.limits.outputs.llm_timeout_sec }}",
+    "CONFIGURED_TASK_MIN": "${{ inputs.review_task_timeout_min }}",
+    "TASK_SHORTENED": "${{ steps.limits.outputs.task_shortened }}",
+    "TASK_CEILING": "${{ steps.limits.outputs.task_ceiling }}",
+    "LLM_SHORTENED": "${{ steps.limits.outputs.llm_shortened }}",
+}
+env = match[0].get("env") or {}
+for k, v in want.items():
+    if env.get(k) != v:
+        sys.exit(f"env {k} is {env.get(k)!r}, expected {v!r}")
 PY
+# Wiring checks exit after step.sh is written; no -e here, so check status.
+[ "$?" -eq 0 ] || { echo "FAIL: extraction or env-wiring checks failed"; exit 1; }
 [ -s "$WORK/step.sh" ] || { echo "FAIL: could not extract the step"; exit 1; }
 
 # gh must not actually post from a test run.

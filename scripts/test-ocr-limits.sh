@@ -65,7 +65,10 @@ for s in attempts:
     # Gated explicitly, so a failed limits step cannot run an attempt with
     # empty inputs; and 60 minutes each, the budget the body's 50-minute
     # split and the expectations below all assume.
-    if "steps.limits.outcome == 'success'" not in str(s.get("if", "")):
+    # Leading clause and no ||: a substring check would accept
+    # "... == 'success' || always()", which bypasses the guard.
+    cond = " ".join(str(s.get("if", "")).replace("${{", "").replace("}}", "").split())
+    if not cond.startswith("steps.limits.outcome == 'success'") or "||" in cond:
         sys.exit(f"attempt {s.get('name')!r} is not gated on the limits step succeeding")
     if s.get("timeout-minutes") != 60:
         sys.exit(f"attempt {s.get('name')!r} has timeout-minutes {s.get('timeout-minutes')!r}, not 60")
@@ -178,7 +181,10 @@ check 0 3000 30 3   "an older stub with higher settings still gets a review" "::
 : > "$WORK/gh_out"
 LLM_TIMEOUT_SEC=$'12\ninjected=1' TASK_TIMEOUT_MIN=25 CHANGED_FILES=3 GITHUB_OUTPUT="$WORK/gh_out" \
   bash --noprofile --norc -eo pipefail "$WORK/step.sh" >"$WORK/out" 2>&1
-if [ "$(grep -c '^error=' "$WORK/gh_out")" = 1 ] && ! grep -q '^injected=' "$WORK/gh_out"; then
+rc=$?
+# Must also FAIL: an error output on a green step would run every attempt
+# with empty inputs.
+if [ "$rc" -ne 0 ] && [ "$(grep -c '^error=' "$WORK/gh_out")" = 1 ] && ! grep -q '^injected=' "$WORK/gh_out"; then
   pass=$((pass+1)); echo "  ok    a failure's reason is one output line, newlines stripped"
 else
   fail=$((fail+1)); echo "  FAIL  error output missing or injectable"; sed 's/^/        /' "$WORK/gh_out"
