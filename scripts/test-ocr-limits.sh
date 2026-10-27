@@ -88,6 +88,11 @@ for s in attempts:
     # assumes.
     if s.get("timeout-minutes") != 85:
         sys.exit(f"attempt {s.get('name')!r} has timeout-minutes {s.get('timeout-minutes')!r}, not 85")
+    w = s.get("with") or {}
+    if (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
+            or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"
+            or w.get("effort") != "${{ steps.limits.outputs.effort }}"):
+        sys.exit(f"attempt {s.get('name')!r} is not fed by the limits step's outputs")
 # ...and 85 is derived from the body's cap, read back rather than assumed, so
 # widening the cap without the budget fails here.
 import re
@@ -103,11 +108,6 @@ dump = json.dumps(doc)
 for name in ("task_shortened", "task_ceiling", "llm_shortened", "changed_files"):
     if name in dump:
         sys.exit(f"the workflow still references the removed {name!r}")
-    w = s.get("with") or {}
-    if (w.get("review_task_timeout") != "${{ steps.limits.outputs.task_minutes }}"
-            or w.get("llm_timeout") != "${{ steps.limits.outputs.llm_timeout_sec }}"
-            or w.get("effort") != "${{ steps.limits.outputs.effort }}"):
-        sys.exit(f"attempt {s.get('name')!r} is not fed by the limits step's outputs")
 PY
 # The wiring assertions above end in sys.exit AFTER step.sh is written, and
 # this script has no -e, so the status must be checked explicitly or a wiring
