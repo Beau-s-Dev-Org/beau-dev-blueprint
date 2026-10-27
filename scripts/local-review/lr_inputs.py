@@ -11,7 +11,7 @@ def git(*args):
         return subprocess.run(["git", *args], check=True, capture_output=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = getattr(exc, "stderr", b"") or b""
-        raise UsageError(f"git {' '.join(args)} failed: {detail.decode(errors='replace').strip() or exc}")
+        raise UsageError(f"git {' '.join(args)} failed: {detail.decode(errors='replace').strip() or exc}") from exc
 
 
 def changed_files(args):
@@ -69,7 +69,7 @@ def repo_hold_patterns(root):
     try:
         return [re.compile(l) for l in lines if l and not l.startswith("#")]
     except re.error as exc:
-        raise UsageError(f"bad pattern in {path}: {exc}")
+        raise UsageError(f"bad pattern in {path}: {exc}") from exc
 
 
 def tier_for(cfg, files, root=None):

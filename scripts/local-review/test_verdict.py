@@ -161,6 +161,12 @@ class Verdict(Base):
         self.assertIn("author's family", out)
         self.assertIn("a review of a different commit", out)
 
+    def test_a_non_ascii_utf8_result_is_read_as_utf8(self):
+        path = self.result("codex", [finding("P3", title="caf\u00e9 \u2014 \u2713")])
+        code, v, _ = self.verdict("anthropic", [path])
+        self.assertEqual(code, 0)
+        self.assertEqual(v["invalid"], [])
+
     def test_markdown_section_for_a_clean_branch(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
                                     "--changed-files", self.files("src/app.py"), "--markdown",

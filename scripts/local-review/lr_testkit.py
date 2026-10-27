@@ -58,12 +58,14 @@ class Base(unittest.TestCase):
     def result(self, reviewer, findings=(), commit=SHA, completed=True, model=None, raw=None):
         path = os.path.join(self.tmp, f"result-{self.n}.json")
         self.n += 1
-        doc = {"schema": "local-review-result/v1", "reviewer": reviewer, "commit": commit,
-               "completed": completed, "findings": list(findings)}
-        if model is not None:
-            doc["model"] = model
-        with open(path, "w") as fh:
-            fh.write(raw if raw is not None else json.dumps(doc))
+        if raw is None:
+            doc = {"schema": "local-review-result/v1", "reviewer": reviewer, "commit": commit,
+                   "completed": completed, "findings": list(findings)}
+            if model is not None:
+                doc["model"] = model
+            raw = json.dumps(doc)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(raw)
         return path
 
     def route(self, author, *extra, files=("src/app.py",)):

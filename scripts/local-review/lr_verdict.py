@@ -24,7 +24,7 @@ def assess(cfg, authors, commit, paths):
     out = {"invalid": [], "stale": [], "ineligible": [], "blocking": [], "reviews": []}
     for path in paths:
         try:
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 doc = json.load(fh)
         except (OSError, ValueError) as exc:
             out["invalid"].append({"file": path, "reason": f"unreadable: {exc}"})
@@ -98,10 +98,12 @@ def markdown(result, rounds):
     if rounds:
         meta.append(f"Rounds: {rounds}")
     lines += ["", " · ".join(meta), "",
-              "| Reviewer | Family | Counts toward clean | P1 | P2 | P3 |", "|---|---|---|---|---|---|"]
+              "| Reviewer | Family | Counts toward clean | " + " | ".join(SEVERITIES) + " |",
+              "|---" * (3 + len(SEVERITIES)) + "|"]
     for r in result["reviews"]:
         lines.append(f"| {cell(r['reviewer'])} | {cell(r['family'] or '?')} | "
-                     f"{'yes' if r['eligible'] else 'no'} | {r['P1']} | {r['P2']} | {r['P3']} |")
+                     f"{'yes' if r['eligible'] else 'no'} | "
+                     + " | ".join(str(r[s]) for s in SEVERITIES) + " |")
     for b in result["blocking"]:
         where = f" ({cell(b['file'])}{':' + str(b['line']) if b.get('line') else ''})" if b.get("file") else ""
         lines.append(f"- **{b['severity']}** from {cell(b['reviewer'])}: {cell(b['title'])}{where}")

@@ -50,9 +50,9 @@ def read_text(path, missing_ok=False):
         # hold list behind a permission error read as no hold list (PR #73).
         if missing_ok:
             return None
-        raise UsageError(f"cannot read {path}: {exc}")
+        raise UsageError(f"cannot read {path}: {exc}") from exc
     except (OSError, UnicodeDecodeError) as exc:
-        raise UsageError(f"cannot read {path}: {exc}")
+        raise UsageError(f"cannot read {path}: {exc}") from exc
 
 
 # --- config -----------------------------------------------------------------
@@ -62,7 +62,7 @@ def load_config(path):
     try:
         cfg = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise UsageError(f"cannot parse config {path}: {exc}")
+        raise UsageError(f"cannot parse config {path}: {exc}") from exc
     if not isinstance(cfg, dict) or cfg.get("schema") != CONFIG_SCHEMA:
         raise UsageError(f"config {path} is not {CONFIG_SCHEMA}")
 
@@ -76,7 +76,7 @@ def load_config(path):
     try:
         cfg["_family_re"] = {name: re.compile(pat) for name, pat in families.items()}
     except (re.error, TypeError) as exc:
-        raise UsageError(f"bad family pattern: {exc}")
+        raise UsageError(f"bad family pattern: {exc}") from exc
 
     seen = set()
     reviewers = cfg.get("reviewers")
@@ -111,13 +111,18 @@ def load_config(path):
 
     # A string here would compile one regex per CHARACTER, and "^" alone puts
     # every path on hold; a mapping would compile its keys. Shape first.
-    hold = cfg.get("hold_paths") or []
+    # Only a MISSING key defaults to empty. `or []` also turned "", {} and
+    # false into an empty list, which passed the shape check and silently
+    # switched the hold tier off (PR #73).
+    hold = cfg.get("hold_paths")
+    if hold is None:
+        hold = []
     if not isinstance(hold, list) or not all(isinstance(p, str) for p in hold):
         raise UsageError("hold_paths must be a list of regex strings")
     try:
         cfg["_hold_re"] = [re.compile(p) for p in hold]
     except (re.error, TypeError) as exc:
-        raise UsageError(f"bad hold_paths pattern: {exc}")
+        raise UsageError(f"bad hold_paths pattern: {exc}") from exc
     rounds = cfg.get("max_rounds", 5)
     if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
         raise UsageError("max_rounds must be a positive integer")
