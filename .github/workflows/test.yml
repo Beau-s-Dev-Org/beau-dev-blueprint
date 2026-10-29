@@ -83,54 +83,19 @@ jobs:
 
       # Cross-family routing and the "clean" verdict for local review (BEA-591).
       # Uses only PyYAML, already installed above.
-      # On Python 3.11, `unittest discover` exits 0 when it finds no tests,
-      # so a renamed test module would turn this into a gate that runs
-      # nothing. Fail unless at least one test ran. pipefail keeps a real test
-      # failure from being masked by tee.
       - name: Local review routing
-        run: |
-          set -o pipefail
-          # Checked explicitly rather than left to the runner's `bash -e`, so
-          # a test failure fails this step wherever the snippet runs.
-          if ! python3 -m unittest discover -s scripts/local-review -v 2>&1 \
-               | tee "$RUNNER_TEMP/local-review-tests.log"; then
-            echo "::error::unittest discover reported failures in scripts/local-review."
-            exit 1
-          fi
-          # Unanchored: a test that writes output without a trailing newline
-          # runs it into the summary line, and an anchor would then miss it.
-          grep -Eq 'Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/local-review-tests.log" || {
-            echo "::error::unittest discover ran no tests in scripts/local-review; the suite did not load."
-            exit 1
-          }
-          # Per module too: a renamed module leaves the others still printing
-          # "Ran N tests", and the gate green on a partial suite.
-          # Every module must have run: the known ones by name, so a module
-          # renamed out of discover's pattern or deleted still fails here, plus
-          # whatever test*.py exists, so a module added later is covered too.
-          # No content-based skipping: a module that lost its tests must fail.
-          # Shared helpers are named lr_*.py (lr_testkit.py), never test*.py.
-          expected="test_detect_author test_route test_verdict"
-          for path in scripts/local-review/test*.py; do
-            expected="$expected $(basename "$path" .py)"
-          done
-          missing=
-          for module in $(printf '%s\n' $expected | sort -u); do
-            grep -qF "($module." "$RUNNER_TEMP/local-review-tests.log" || missing="$missing $module"
-          done
-          [ -z "$missing" ] || {
-            echo "::error::unittest discover did not run$missing; the gate would pass on a partial suite."
-            exit 1
-          }
+        run: bash scripts/test-local-review.sh
 
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.
       # !cancelled(): a failing gate above must not skip the report, since those are
       # the runs where it is most wanted. Not on cancellation.
-      # continue-on-error: after an earlier failure (even one before PyYAML is
-      # installed) the audit's own exit must not become the job's recorded
-      # failure and hide which gate broke. Its result stays visible in the log.
+      # continue-on-error only after an earlier failure (even one before PyYAML
+      # is installed): then the audit's own exit must not become the job's
+      # recorded failure and hide which gate broke. On an otherwise-green run
+      # it still fails the job, since an audit that cannot reach the gate step
+      # is the regression it exists to catch.
       - name: OCR completeness state audit
         if: ${{ !cancelled() }}
-        continue-on-error: true
+        continue-on-error: ${{ job.status != 'success' }}
         run: python3 scripts/audit-ocr-completeness-states.py
