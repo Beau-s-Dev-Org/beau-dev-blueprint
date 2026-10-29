@@ -4,7 +4,7 @@ import os
 import re
 import subprocess
 
-from lr_config import UsageError, compile_pattern, read_text
+from lr_config import UsageError, compile_pattern, read_text, split_lines
 
 def git(*args):
     try:
@@ -20,9 +20,7 @@ def changed_files(args):
     if args.changed_files:
         # Unreadable input is a usage error (exit 2). An uncaught OSError would
         # exit 1, which the coordinator reads as "not clean".
-        # CRLF normalised: "path\r" fails every anchored hold pattern.
-        lines = read_text(args.changed_files).replace("\r\n", "\n").split("\n")
-        return [line for line in lines if line]
+        return [line for line in split_lines(read_text(args.changed_files)) if line]
     if args.base:
         # -z: a path may legally contain a newline. --no-renames: with rename
         # detection on, a rename reports only its DESTINATION, so moving
@@ -76,14 +74,21 @@ def repo_hold_patterns(root):
     text = read_text(path, missing_ok=True)
     if text is None:
         return []
+    # Every line shape, one rule each:
+    #   blank or whitespace-only     skipped
+    #   comment ("#...", indented ok) skipped
+    #   pattern + whitespace + "#"   refused: a trailing comment compiles into
+    #                                a pattern that never matches, silently
+    #                                dropping the hold
+    #   literal "#" in a path        allowed (docs/C#-guide.md); write a path
+    #                                containing " #" as "\s#" or "[ ]#"
+    #   padded pattern               refused by compile_pattern, exactly as in
+    #                                reviewers.yaml's hold_paths
+    # Line endings (CRLF, LF, lone CR) are handled by split_lines.
     patterns = []
-    for line in (line.strip() for line in text.split("\n")):
-        if not line or line.startswith("#"):
+    for line in split_lines(text):
+        if not line.strip() or line.strip().startswith("#"):
             continue
-        # A trailing comment compiles into a pattern that never matches,
-        # silently dropping the hold, so whitespace before '#' is refused. A
-        # '#' inside a path (docs/C#-guide.md) is literal and stays allowed;
-        # a path with " #" in it can be written as "\s#" or "[ ]#".
         comment = re.search(r"\s#", line)
         if comment:
             raise UsageError(f"pattern in {path}: inline comments are not supported; "

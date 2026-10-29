@@ -124,6 +124,15 @@ class RepoHoldPaths(Base):
         self.hold_file("^scripts/\t# tab-separated\n")
         self.assertEqual(self.tier(self.tmp, "scripts/build.sh")[0], 2)
 
+    def test_hold_file_lines_follow_one_rule(self):
+        # Padded: refused, as in reviewers.yaml. Indented comment, CR-only
+        # endings and whitespace-only lines: fine.
+        for text in (" ^scripts/\n", "^scripts/ \n", "\t^scripts/\n"):
+            self.hold_file(text)
+            self.assertEqual(self.tier(self.tmp, "scripts/build.sh")[0], 2, repr(text))
+        self.hold_file("  # note\r   \r^docs/\r^scripts/\r")
+        self.assertEqual(self.tier(self.tmp, "scripts/build.sh"), (0, "hold"))
+
     def test_literal_hash_in_a_path_is_a_valid_pattern(self):
         self.hold_file("^docs/C#-guide\\.md$\n")
         self.assertEqual(self.tier(self.tmp, "docs/C#-guide.md"), (0, "hold"))
@@ -338,6 +347,11 @@ reviewers:
         self.assertEqual(code, 0)
         self.assertIn("**Not run:** quota ## Injected \\| x\n", out)
         self.assertNotIn("\n## Injected", out)
+        code, out, _ = self.run_cli("--config", self.config(
+            self.BASE + "  - {id: c, family: openai, agent: codex, enabled: true}\n"),
+            "unavailable", "--reason", "quota\r## Injected")
+        self.assertEqual(code, 0)
+        self.assertNotIn("\r", out)
 
     def test_config_rejects_unknown_keys(self):
         # A typo must not read as a missing key and quietly weaken the gate.

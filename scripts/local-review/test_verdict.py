@@ -185,6 +185,15 @@ class Verdict(Base):
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out)["tier"], "hold")
 
+    def test_cr_only_changed_files_still_match_hold_paths(self):
+        path = os.path.join(self.tmp, "cr.txt")
+        with open(path, "w", newline="") as fh:
+            fh.write("README.md\r.github/workflows/ci.yml\r")
+        code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
+                                    "--changed-files", path, self.result("codex"))
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["tier"], "hold")
+
     def test_clean_headline_counts_clean_families_not_a_ratio(self):
         code, out, _ = self.run_cli("verdict", "--author-family", "anthropic", "--commit", SHA,
                                     "--changed-files", self.files("src/app.py"), "--markdown",

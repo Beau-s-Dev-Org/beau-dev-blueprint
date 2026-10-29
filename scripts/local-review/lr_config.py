@@ -90,6 +90,16 @@ def read_text(path, missing_ok=False):
         raise UsageError(f"cannot read {path}: {exc}") from exc
 
 
+def split_lines(text):
+    """Lines of a line-oriented input, each exactly as written (not stripped).
+
+    Every line ending counts: CRLF, LF, and a lone CR. Splitting on LF alone
+    left "path\r" (CRLF), or one merged pseudo-path (CR-only), and either
+    fails every anchored hold pattern, routing a held change as standard.
+    """
+    return re.split(r"\r\n|\r|\n", text)
+
+
 # --- config -----------------------------------------------------------------
 
 def load_config(path):

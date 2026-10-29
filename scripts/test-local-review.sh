@@ -38,12 +38,20 @@ expected="test_detect_author test_route test_verdict"
 for path in "$ROOT"/scripts/local-review/test*.py; do
   expected="$expected $(basename "$path" .py)"
 done
+# Executed, not just loaded: a module whose every test is skipped still prints
+# "(module." lines. Each result ("... ok", "... FAIL", "... ERROR", or the
+# expected-failure forms) is credited to the last module named, which also
+# holds when a docstring puts the result on the line after the test id.
+executed=$(awk '
+  match($0, /\(test[A-Za-z0-9_]*\./) { cur = substr($0, RSTART + 1, RLENGTH - 2) }
+  cur != "" && / \.\.\. (ok|FAIL|ERROR|expected failure|unexpected success)$/ { print cur }
+' "$LOG" | sort -u)
 missing=
 for module in $(printf '%s\n' $expected | sort -u); do
-  grep -qF "($module." "$LOG" || missing="$missing $module"
+  printf '%s\n' "$executed" | grep -qxF "$module" || missing="$missing $module"
 done
 [ -z "$missing" ] || {
-  echo "::error::unittest discover did not run$missing; the gate would pass on a partial suite."
+  echo "::error::unittest discover ran no tests in$missing (missing, or every test skipped); the gate would pass on a partial suite."
   exit 1
 }
 echo "Local review tests: all modules ran."

@@ -81,7 +81,8 @@ def assess(cfg, authors, commit, paths):
 
 
 def cell(value):
-    return str(value).replace("|", "\\|").replace("\n", " ")
+    # A lone CR is a line ending to CommonMark too, so it could break out.
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
 def markdown(result, rounds):
