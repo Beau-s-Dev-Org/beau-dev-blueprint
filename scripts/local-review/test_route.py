@@ -116,6 +116,12 @@ class RepoHoldPaths(Base):
         self.hold_file("# comment\n\n^scripts/\n")
         self.assertEqual(self.tier(self.tmp, "scripts/build.sh"), (0, "hold"))
 
+    def test_inline_comment_is_refused_not_a_dead_pattern(self):
+        self.hold_file("^scripts/  # everything under scripts\n")
+        code, err = self.tier(self.tmp, "scripts/build.sh")
+        self.assertEqual(code, 2)
+        self.assertIn("inline comments are not supported", err)
+
     def test_blueprint_hold_list_is_bounded(self):
         # Ordinary blueprint files stay standard, so a hold pattern broadened
         # until it matches everything cannot pass unnoticed.
@@ -317,6 +323,14 @@ reviewers:
             code, err = self.load(f"  - {entry}\n")
             self.assertEqual(code, 2, entry)
             self.assertIn("reviewer c", err, entry)
+
+    def test_unavailable_reason_cannot_break_the_section(self):
+        code, out, _ = self.run_cli("--config", self.config(
+            self.BASE + "  - {id: c, family: openai, agent: codex, enabled: true}\n"),
+            "unavailable", "--reason", "quota\n## Injected | x")
+        self.assertEqual(code, 0)
+        self.assertIn("**Not run:** quota ## Injected \\| x\n", out)
+        self.assertNotIn("\n## Injected", out)
 
     def test_config_rejects_unknown_keys(self):
         # A typo must not read as a missing key and quietly weaken the gate.

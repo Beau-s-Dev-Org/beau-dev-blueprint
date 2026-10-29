@@ -75,9 +75,17 @@ def repo_hold_patterns(root):
     text = read_text(path, missing_ok=True)
     if text is None:
         return []
-    lines = [line.strip() for line in text.split("\n")]
-    return [compile_pattern(line, f"pattern in {path}")
-            for line in lines if line and not line.startswith("#")]
+    patterns = []
+    for line in (line.strip() for line in text.split("\n")):
+        if not line or line.startswith("#"):
+            continue
+        # A trailing comment compiles into a pattern that never matches,
+        # silently dropping the hold. '#' means nothing in a path regex here.
+        if "#" in line:
+            raise UsageError(f"pattern in {path}: inline comments are not supported; "
+                             f"put {line[line.index('#'):]!r} on its own line")
+        patterns.append(compile_pattern(line, f"pattern in {path}"))
+    return patterns
 
 
 def tier_for(cfg, files, root=None):

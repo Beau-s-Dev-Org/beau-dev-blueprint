@@ -27,7 +27,7 @@ import tempfile
 from lr_config import (DEFAULT_CONFIG, TRAILER_RE, Unsatisfiable, UsageError,  # noqa: F401
                        is_sha, load_config, parse_families, read_text)
 from lr_inputs import REPO_HOLD_FILE, changed_files, git, repo_root, tier_for
-from lr_verdict import assess, markdown
+from lr_verdict import assess, cell, markdown
 
 
 # --- detect-author ----------------------------------------------------------
@@ -168,7 +168,7 @@ def cmd_unavailable(cfg, args):
     print("\n".join([
         "## Local review",
         "",
-        f"**Not run:** {args.reason.strip()}",
+        f"**Not run:** {cell(args.reason.strip())}",
         "",
         "No local reviewer could review this branch, so OCR runs the review rounds on this PR.",
     ]))
