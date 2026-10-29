@@ -42,9 +42,12 @@ done
 # "(module." lines. Each result ("... ok", "... FAIL", "... ERROR", or the
 # expected-failure forms) is credited to the last module named, which also
 # holds when a docstring puts the result on the line after the test id.
+# The result word is matched at end of line but not required to follow
+# " ... " directly: output a test writes without a newline lands between the
+# two ("... foook"), as with the "Ran" check above. A skip ends "skipped '…'".
 executed=$(awk '
   match($0, /\(test[A-Za-z0-9_]*\./) { cur = substr($0, RSTART + 1, RLENGTH - 2) }
-  cur != "" && / \.\.\. (ok|FAIL|ERROR|expected failure|unexpected success)$/ { print cur }
+  cur != "" && / \.\.\. / && /(ok|FAIL|ERROR|expected failure|unexpected success)$/ { print cur }
 ' "$LOG" | sort -u)
 missing=
 for module in $(printf '%s\n' $expected | sort -u); do
