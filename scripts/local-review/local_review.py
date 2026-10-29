@@ -190,7 +190,7 @@ def main(argv=None):
     def files_args(sp):
         sp.add_argument("--base", help="diff base ref, e.g. origin/main")
         sp.add_argument("--changed-files", help="newline-separated changed paths instead of git diff")
-        sp.add_argument("--repo-root", help=f"where to find {REPO_HOLD_FILE} (default: the git toplevel when --base is used)")
+        sp.add_argument("--repo-root", help=f"where to find {REPO_HOLD_FILE} (default: the git toplevel, whenever git can find one; none outside a git checkout)")
 
     r = sub.add_parser("route", help="ordered cross-family reviewer candidates")
     r.add_argument("--author-family", required=True)

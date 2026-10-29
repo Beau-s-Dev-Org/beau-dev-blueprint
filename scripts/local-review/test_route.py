@@ -121,6 +121,13 @@ class RepoHoldPaths(Base):
         code, err = self.tier(self.tmp, "scripts/build.sh")
         self.assertEqual(code, 2)
         self.assertIn("inline comments are not supported", err)
+        self.hold_file("^scripts/\t# tab-separated\n")
+        self.assertEqual(self.tier(self.tmp, "scripts/build.sh")[0], 2)
+
+    def test_literal_hash_in_a_path_is_a_valid_pattern(self):
+        self.hold_file("^docs/C#-guide\\.md$\n")
+        self.assertEqual(self.tier(self.tmp, "docs/C#-guide.md"), (0, "hold"))
+        self.assertEqual(self.tier(self.tmp, "docs/guide.md"), (0, "standard"))
 
     def test_blueprint_hold_list_is_bounded(self):
         # Ordinary blueprint files stay standard, so a hold pattern broadened

@@ -1,6 +1,7 @@
 """Changed-file inventory, repo hold list, and review tier for local_review.py."""
 
 import os
+import re
 import subprocess
 
 from lr_config import UsageError, compile_pattern, read_text
@@ -80,10 +81,13 @@ def repo_hold_patterns(root):
         if not line or line.startswith("#"):
             continue
         # A trailing comment compiles into a pattern that never matches,
-        # silently dropping the hold. '#' means nothing in a path regex here.
-        if "#" in line:
+        # silently dropping the hold, so whitespace before '#' is refused. A
+        # '#' inside a path (docs/C#-guide.md) is literal and stays allowed;
+        # a path with " #" in it can be written as "\s#" or "[ ]#".
+        comment = re.search(r"\s#", line)
+        if comment:
             raise UsageError(f"pattern in {path}: inline comments are not supported; "
-                             f"put {line[line.index('#'):]!r} on its own line")
+                             f"put {line[comment.start():].strip()!r} on its own line")
         patterns.append(compile_pattern(line, f"pattern in {path}"))
     return patterns
 
