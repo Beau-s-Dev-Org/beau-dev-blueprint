@@ -1,0 +1,86 @@
+# Local cross-family review roster (BEA-591).
+#
+# Read by scripts/local-review/local_review.py, which every local review round
+# goes through. The rule it enforces: a branch is reviewed only by models from
+# a different family than the one that wrote it, because a reviewer shares the
+# blind spots of its own family.
+#
+# Model names live here and nowhere else. An empty `model` means "launch the
+# agent with whatever model it is configured to use".
+schema: local-review-config/v1
+
+# How a model name maps to its family. Used for reviewers whose tool can run
+# more than one family (Cursor, Antigravity): for those, the family is a
+# property of the model, not of the tool, so the model a review actually ran
+# on must match its family pattern or the review does not count.
+families:
+  anthropic: '(?i)claude|anthropic|opus|sonnet|haiku|fable'
+  openai: '(?i)gpt|openai|codex|\bo[0-9]'
+  google: '(?i)gemini|google'
+
+# `agent` is the Orca agent id passed to `orca orchestration worker-start
+# --agent`. Order is the default rotation order.
+reviewers:
+  - id: codex
+    family: openai
+    agent: codex
+    model: ''
+    enabled: true
+  - id: claude
+    family: anthropic
+    agent: claude
+    model: ''
+    enabled: true
+  - id: antigravity
+    family: google
+    agent: antigravity
+    multi_provider: true
+    model: ''
+    enabled: true
+  # Cursor can run several families, so each family is its own entry, and
+  # each needs a `model` of that family set BEFORE it is enabled: with an
+  # empty model Cursor runs its own default, and a review on the wrong family
+  # is discarded by `verdict`, costing a round. Disabled until this account
+  # has models available (`cursor-agent models` listed none on 2026-10-26).
+  - id: cursor-openai
+    family: openai
+    agent: cursor
+    multi_provider: true
+    model: ''
+    enabled: false
+  - id: cursor-google
+    family: google
+    agent: cursor
+    multi_provider: true
+    model: ''
+    enabled: false
+
+# A branch touching any of these paths is on the hold-for-Beau list and needs
+# TWO different non-author families to come back clean, not one. Python regexes
+# matched (re.search) against repo-relative paths. The keyword pattern errs
+# toward including a path: a false match costs one extra review round, a missed
+# one lets a sensitive change through on a single family.
+hold_paths:
+  - '^\.github/'
+  - '^\.agents/scripts/'
+  - '^contract/'
+  - '^scripts/check_'
+  - '^scripts/local-review/'
+  # Review and merge policy outside scripts: the skills that run the loop, the
+  # caller stubs and templates, and the agent rules that state the policy.
+  - '^\.skills/'
+  - '^templates/'
+  - '(^|/)(CLAUDE|AGENTS)(-template)?\.md$'
+  # A repo's own hold list. Editing it can weaken the gate, so it is held too.
+  - '(^|/)\.local-review-hold-paths$'
+  - '(^|/)(CODEOWNERS|LICENSE[^/]*|REUSE\.toml)$'
+  # auth(?!or): authn/authz/OAuth paths, not author/authors. authori[sz] keeps
+  # authorization and authorisation (both spellings) on hold.
+  - '(?i)authori[sz]|auth(?!or)|rbac|identity|security|quarantine|secret|credential|licen[cs]e|migration'
+  # Database schema, whatever the stack calls it.
+  - '(?i)schema|\.sql$|(^|/)alembic/|\.prisma$'
+  # Customer-facing copy has no common path, so it cannot be listed here: each
+  # repo names its copy directories in its own .local-review-hold-paths.
+
+# Rounds before the loop stops and escalates to Beau instead of trying again.
+max_rounds: 5

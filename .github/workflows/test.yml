@@ -16,12 +16,14 @@ on:
       - '.github/workflows/ocr-review.yml'
       - '.github/workflows/test.yml'
       - 'scripts/**'
+      - '.local-review-hold-paths'
   push:
     branches: [main]
     paths:
       - '.github/workflows/ocr-review.yml'
       - '.github/workflows/test.yml'
       - 'scripts/**'
+      - '.local-review-hold-paths'
   workflow_dispatch:
 
 # One run per ref; a superseded push has nothing left to prove.
@@ -79,7 +81,21 @@ jobs:
       - name: OCR review time limits
         run: bash scripts/test-ocr-limits.sh
 
+      # Cross-family routing and the "clean" verdict for local review (BEA-591).
+      # Uses only PyYAML, already installed above.
+      - name: Local review routing
+        run: bash scripts/test-local-review.sh
+
       # The audit is a report, not a pass/fail gate — but it exits non-zero when
       # it cannot reach the step at all, which is how it broke the first time.
+      # !cancelled(): a failing gate above must not skip the report, since those are
+      # the runs where it is most wanted. Not on cancellation.
+      # continue-on-error only after an earlier failure (even one before PyYAML
+      # is installed): then the audit's own exit must not become the job's
+      # recorded failure and hide which gate broke. On an otherwise-green run
+      # it still fails the job, since an audit that cannot reach the gate step
+      # is the regression it exists to catch.
       - name: OCR completeness state audit
+        if: ${{ !cancelled() }}
+        continue-on-error: ${{ job.status != 'success' }}
         run: python3 scripts/audit-ocr-completeness-states.py

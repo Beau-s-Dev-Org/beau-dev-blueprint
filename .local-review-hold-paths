@@ -1,0 +1,19 @@
+# Hold-for-Beau paths specific to this repo, one Python regex per line, read by
+# scripts/local-review/local_review.py on top of the shared list in
+# scripts/local-review/reviewers.yaml. A change matching any line needs two
+# non-author model families to come back clean before the PR opens.
+#
+# In the blueprint, everything under scripts/ is review or merge pipeline: the
+# OCR completeness tests and audit, the rollout script that re-stamps every
+# consuming repo's pin, and local review itself.
+^scripts/
+# Project templates stamped into every consuming repo: a change here changes
+# their agent rules and ignores fleet-wide. Matched by the naming convention,
+# not today's file list, so a template added later is held too.
+# "template" anywhere in the path, file or directory, any case. Narrower
+# forms were patched four rounds running (suffix; separator and case;
+# extension; directories), so this is the general case. A false match costs
+# one extra review round.
+(?i)template
+# The proposal spec the collaborator guide makes required reading.
+(?i)(^|/)proposal-format\.md$
