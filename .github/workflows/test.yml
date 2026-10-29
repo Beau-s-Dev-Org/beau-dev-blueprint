@@ -97,7 +97,9 @@ jobs:
             echo "::error::unittest discover reported failures in scripts/local-review."
             exit 1
           fi
-          grep -Eq '^Ran [1-9][0-9]* test' "$RUNNER_TEMP/local-review-tests.log" || {
+          # Unanchored: a test that writes output without a trailing newline
+          # runs it into the summary line, and an anchor would then miss it.
+          grep -Eq 'Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/local-review-tests.log" || {
             echo "::error::unittest discover ran no tests in scripts/local-review; the suite did not load."
             exit 1
           }
@@ -125,6 +127,10 @@ jobs:
       # it cannot reach the step at all, which is how it broke the first time.
       # !cancelled(): a failing gate above must not skip the report, since those are
       # the runs where it is most wanted. Not on cancellation.
+      # continue-on-error: after an earlier failure (even one before PyYAML is
+      # installed) the audit's own exit must not become the job's recorded
+      # failure and hide which gate broke. Its result stays visible in the log.
       - name: OCR completeness state audit
         if: ${{ !cancelled() }}
+        continue-on-error: true
         run: python3 scripts/audit-ocr-completeness-states.py
