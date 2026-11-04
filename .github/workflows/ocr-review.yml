@@ -201,6 +201,12 @@ jobs:
     # so "is this fallback configured?" is computed here in job env — where
     # secrets ARE available — and the fallback steps gate on the boolean.
     env:
+      # The npm launcher starts a background `npm i -g <latest>` on its first run.
+      # npm removes the old package before installing the new one, so a later
+      # `ocr review` fails with "Cannot find module '/usr/local/bin/ocr'" whenever
+      # a newer release exists. It would also swap the pinned version for an
+      # unpinned one in a job that holds secrets. Job-level env reaches the action.
+      OCR_NO_UPDATE: '1'
       OCR_FALLBACK1_CONFIGURED: ${{ secrets.OCR_LLM_URL_FALLBACK1 != '' && secrets.OCR_LLM_AUTH_TOKEN_FALLBACK1 != '' && inputs.llm_model_fallback1 != '' }}
       OCR_FALLBACK2_CONFIGURED: ${{ secrets.OCR_LLM_URL_FALLBACK2 != '' && secrets.OCR_LLM_AUTH_TOKEN_FALLBACK2 != '' && inputs.llm_model_fallback2 != '' }}
     # Conditional concurrency group (job-level, since a reusable workflow
